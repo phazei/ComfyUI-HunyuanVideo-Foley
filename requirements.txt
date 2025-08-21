@@ -1,0 +1,48 @@
+# Core ML dependencies
+torch>=2.0.0
+torchvision>=0.15.0
+torchaudio>=2.0.0
+numpy==1.26.4
+scipy
+
+# Deep Learning frameworks
+diffusers
+timm
+accelerate
+
+# Transformers and NLP
+git+https://github.com/huggingface/transformers@v4.49.0-SigLIP-2
+sentencepiece
+
+# Audio processing
+git+https://github.com/descriptinc/audiotools
+
+# Video/Image processing
+pillow
+av
+einops
+
+# Configuration and utilities
+pyyaml
+omegaconf
+easydict
+loguru
+tqdm
+setuptools
+
+# Data handling
+pandas
+pyarrow
+
+# Web interface
+gradio==3.50.2
+
+# Network
+urllib3==2.4.0
+
+# Development dependencies (optional)
+black>=23.0.0
+isort>=5.12.0
+flake8>=6.0.0
+mypy>=1.3.0
+pre-commit>=3.0.0

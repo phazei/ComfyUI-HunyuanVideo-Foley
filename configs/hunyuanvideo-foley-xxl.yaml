@@ -1,0 +1,49 @@
+model_config:
+  model_name: HunyuanVideo-Foley-XXL
+  model_type: 1d
+  model_precision: bf16
+  model_kwargs:
+    depth_triple_blocks: 18
+    depth_single_blocks: 36
+    hidden_size: 1536
+    num_heads: 12
+    mlp_ratio: 4
+    mlp_act_type: "gelu_tanh"
+    qkv_bias: True
+    qk_norm: True
+    qk_norm_type: "rms"
+    attn_mode: "torch"
+    embedder_type: "default"
+    interleaved_audio_visual_rope: True
+    enable_learnable_empty_visual_feat: True
+    sync_modulation: False
+    add_sync_feat_to_audio: True
+    cross_attention: True
+    use_attention_mask: False
+    condition_projection: "linear"
+    sync_feat_dim: 768 # syncformer 768 dim
+    condition_dim: 768  # clap 768 text condition dim (clip-text)
+    clip_dim: 768  # siglip2 visual dim
+    audio_vae_latent_dim: 128 
+    audio_frame_rate: 50
+    patch_size: 1
+    rope_dim_list: null
+    rope_theta: 10000
+    text_length: 77
+    clip_length: 64 
+    sync_length: 192
+    use_mmaudio_singleblock: True
+    depth_triple_ssl_encoder: null
+    depth_single_ssl_encoder: 8
+    use_repa_with_audiossl: True
+
+diffusion_config:
+  denoise_type: "flow"
+  flow_path_type: "linear"
+  flow_predict_type: "velocity"
+  flow_reverse: True
+  flow_solver: "euler"
+  sample_flow_shift: 1.0
+  sample_use_flux_shift: False
+  flux_base_shift: 0.5
+  flux_max_shift: 1.15
