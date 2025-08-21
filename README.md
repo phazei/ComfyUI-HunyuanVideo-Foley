@@ -1,8 +1,8 @@
 # HunyuanVideo-Foley: Multimodal Diffusion with Representation Alignment for High-Fidelity Foley Audio Generation
 
 <div align="center">
-  <a href="https://github.com/Tencent-Hunyuan/HunyuanVideo-Foley"><img src="https://img.shields.io/static/v1?label=HunyuanVideo-Foley Code&message=Github&color=blue"></a> &ensp;
   <a href="https://aivideo.hunyuan.tencent.com"><img src="https://img.shields.io/static/v1?label=Project%20Page&message=Web&color=green"></a> &ensp;
+  <a href="https://github.com/Tencent-Hunyuan/HunyuanVideo-Foley"><img src="https://img.shields.io/static/v1?label=HunyuanVideo-Foley Code&message=Github&color=blue"></a> &ensp;
   <!-- <a href="https://video.hunyuan.tencent.com"><img src="https://img.shields.io/static/v1?label=Playground&message=Web&color=green"></a> -->
   <a href="https://arxiv.org/abs/2506.xxxx"><img src="https://img.shields.io/badge/ArXiv-2506.17201-red"></a> &ensp;
     <a href="https://huggingface.co/tencent/HunyuanVideo-Foley"><img src="https://img.shields.io/static/v1?label=HunyuanVideo-Foley&message=HuggingFace&color=yellow"></a>
