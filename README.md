@@ -1,16 +1,17 @@
 # HunyuanVideo-Foley: Multimodal Diffusion with Representation Alignment for High-Fidelity Foley Audio Generation
 
 <div align="center">
-  <a href="https://aivideo.hunyuan.tencent.com"><img src="https://img.shields.io/static/v1?label=Project%20Page&message=Web&color=green"></a> &ensp;
-  <a href="https://github.com/Tencent-Hunyuan/HunyuanVideo-Foley"><img src="https://img.shields.io/static/v1?label=HunyuanVideo-Foley Code&message=Github&color=blue"></a> &ensp;
-  <!-- <a href="https://video.hunyuan.tencent.com"><img src="https://img.shields.io/static/v1?label=Playground&message=Web&color=green"></a> -->
-  <a href="https://arxiv.org/abs/2506.xxxx"><img src="https://img.shields.io/badge/ArXiv-2506.17201-red"></a> &ensp;
-    <a href="https://huggingface.co/tencent/HunyuanVideo-Foley"><img src="https://img.shields.io/static/v1?label=HunyuanVideo-Foley&message=HuggingFace&color=yellow"></a>
+  <a href="https://aivideo.hunyuan.tencent.com"><img src="https://img.shields.io/static/v1?label=Project&message=Web&color=green"></a> &ensp;
+  <a href="https://github.com/Tencent-Hunyuan/HunyuanVideo-Foley"><img src="https://img.shields.io/static/v1?label=Code&message=Github&color=blue"></a> &ensp;
+  <a href="https://arxiv.org/abs/2506.17201"><img src="https://img.shields.io/badge/ArXiv-2506.17201-red"></a> &ensp;
+  <a href="https://huggingface.co/tencent/HunyuanVideo-Foley"><img src="https://img.shields.io/static/v1?label=Model&message=HuggingFace&color=yellow"></a>
 </div>
 
 
 ## **Demo**
 TODO: pr video
+
+![full video](https://github.com/user-attachments/assets/d8548970-4271-49eb-833d-1d346f5f31e0)
 
 ## Abstract
 Recent advances in video generation produce visually realistic content, yet the absence of synchronized audio severely compromises immersion. To address key challenges in video-to-audio generation, including multimodal data scarcity, modality imbalance and limited audio quality in existing methods, we propose HunyuanVideo-Foley, an end-to-end text-video-to-audio framework that synthesizes high-fidelity audio precisely aligned with visual dynamics and semantic context. Our approach incorporates three core innovations: (1) a scalable data pipeline curating 100k-hour multimodal datasets through automated annotation; (2) a representation alignment strategy using self-supervised audio features to guide latent diffusion training, efficiently improving audio quality and generation stability; (3) a novel multimodal diffusion transformer resolving modal competition, containing dual-stream audio-video fusion through joint attention, and textual semantic injection via cross-attention. Comprehensive evaluations demonstrate that HunyuanVideo-Foley achieves new state-of-the-art performance across audio fidelity, visual-semantic alignment, temporal alignment and distribution matching
