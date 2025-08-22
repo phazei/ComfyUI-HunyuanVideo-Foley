@@ -1,10 +1,29 @@
 # HunyuanVideo-Foley: Multimodal Diffusion with Representation Alignment for High-Fidelity Foley Audio Generation
 
 <div align="center">
-  <a href="https://aivideo.hunyuan.tencent.com"><img src="https://img.shields.io/static/v1?label=Project&message=Web&color=green"></a> &ensp;
+  <a href="https://szczesnys.github.io/hunyuanvideo-foley"><img src="https://img.shields.io/static/v1?label=Project&message=pages&color=green"></a> &ensp;
   <a href="https://github.com/Tencent-Hunyuan/HunyuanVideo-Foley"><img src="https://img.shields.io/static/v1?label=Code&message=Github&color=blue"></a> &ensp;
-  <a href="https://arxiv.org/abs/2506.17201"><img src="https://img.shields.io/badge/ArXiv-2506.17201-red"></a> &ensp;
-  <a href="https://huggingface.co/tencent/HunyuanVideo-Foley"><img src="https://img.shields.io/static/v1?label=Model&message=HuggingFace&color=yellow"></a>
+  <a href="https://arxiv.org/abs/2506.17201"><img src="https://img.shields.io/badge/arXiv-HunyuanVideoFoley-red?logo=arxiv"></a> &ensp;
+  <a href="https://huggingface.co/tencent/HunyuanVideo-Foley"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20_Model-Huggingface-ffc107?color=ffc107&logoColor=white"></a>
+</div>
+
+<div>
+    <a href="" target="_blank">Sizhe Shan</a><sup>1,</sup><sup>2</sup><sup>*</sup>,</span>
+    <a href="" target="_blank">Qiulin li</a><sup>1,</sup><sup>3</sup><sup>*</sup>, </span>
+    <a href="" target="_blank">Yutao Cui</a><sup>1</sup>,</span>
+    <a href="" target="_blank">Miles Yang</a><sup>1</sup>,</span>
+    <a href="" target="_blank">Zhao Zhong</a><sup>1</sup>,</span>
+    <a href="" target="_blank">Yuehai Wang</a><sup>2</sup>,</span>
+    <a href="" target="_blank">Qun Yang</a><sup>3</sup>,</span>
+    <a href="" target="_blank">Jin Zhou</a><sup>1</sup><sup>†</sup></span>
+</div>
+
+<div align="center" style="font-family: charter;">
+    <sup>1</sup>Tencent, Hunyuan&emsp;
+    </br>
+    <sup>2</sup>Zhejiang University&emsp;
+    </br>
+    <sup>3</sup>Nanjing University of Aeronautics and Astronautics&emsp;
 </div>
 
 
@@ -16,7 +35,16 @@ TODO: pr video
 </div>
 
 ## Abstract
-Recent advances in video generation produce visually realistic content, yet the absence of synchronized audio severely compromises immersion. To address key challenges in video-to-audio generation, including multimodal data scarcity, modality imbalance and limited audio quality in existing methods, we propose HunyuanVideo-Foley, an end-to-end text-video-to-audio framework that synthesizes high-fidelity audio precisely aligned with visual dynamics and semantic context. Our approach incorporates three core innovations: (1) a scalable data pipeline curating 100k-hour multimodal datasets through automated annotation; (2) a representation alignment strategy using self-supervised audio features to guide latent diffusion training, efficiently improving audio quality and generation stability; (3) a novel multimodal diffusion transformer resolving modal competition, containing dual-stream audio-video fusion through joint attention, and textual semantic injection via cross-attention. Comprehensive evaluations demonstrate that HunyuanVideo-Foley achieves new state-of-the-art performance across audio fidelity, visual-semantic alignment, temporal alignment and distribution matching
+Tencent Hunyuan officially open-sources the end-to-end video sound effect generation model HunyuanVideo-Foley! A professional-grade sound effect generation tool specifically designed for video content creators, widely applicable to diverse scenarios including short video creation, film production, advertising creativity, and game development.
+The model's core highlights include:
+
+* Multi-scenario audio-visual synchronization: Supports generating high-quality audio that is synchronized and semantically aligned with complex video scenes, enhancing realism and immersive experience, suitable for diverse creative needs in film/TV and gaming;
+* Multi-modal semantic balance: Balances the analysis of visual and textual information, comprehensively orchestrates sound effect elements, avoids one-sided generation, and meets personalized dubbing requirements;
+* High-fidelity audio output: Self-developed 48kHz audio VAE perfectly reconstructs sound effects, music, and vocals, achieving professional-grade audio generation.
+
+On multiple evaluation benchmarks, HunyuanVideo-Foley's performance comprehensively leads the field, achieving new state-of-the-art (SOTA) levels in dimensions including audio fidelity, visual-semantic alignment, temporal alignment, and distribution matching, surpassing all open-source solutions.
+
+![image](assets/pan_chart.png)
 
 ## Data Pipeline Design
 ![image](assets/data_pipeline.png)
@@ -51,18 +79,6 @@ Objective Evaluation Results on Kling-Audio-Eval
 | MMAudio | 9.01 | 205.85 | 2.17 | 9.59 | 5.94 | 2.91 | 3.30 | 5.39 | 0.30 | 0.56 | 0.27 |
 | ThinkSound | 9.92 | 228.68 | 2.39 | 6.86 | 5.78 | 3.23 | 3.12 | 5.11 | 0.22 | 0.67 | 0.22 |
 | **HiFi-Foley (ours)** | **6.07** | **202.12** | **1.89** | **8.30** | **6.12** | **2.76** | **3.22** | **5.53** | **0.38** | **0.54** | **0.24** |
-
-
-Objective Evaluation Results on VGGSound-Test
-
-| Method | FD_PANNs ↓ | FD_PASST ↓ | KL ↓ | IS ↑ | PQ ↑ | PC ↓ | CE ↑ | CU ↑ | IB ↑ | DeSync ↓ | CLAP ↑ |
-|--------|------------|------------|------|------|------|------|------|------|------|----------|---------|
-| FoleyGrafter | 20.65 | 171.43 | 2.26 | 14.58 | 6.33 | 2.87 | 3.60 | 5.74 | 0.26 | 1.22 | 0.19 |
-| V-AURA | 18.91 | 291.72 | 2.40 | 8.58 | 5.70 | 4.19 | 3.49 | 4.87 | 0.27 | 0.72 | 0.12 |
-| Frieren | 11.69 | 83.17 | 2.75 | 12.23 | 5.87 | 2.99 | 3.54 | 5.32 | 0.23 | 0.85 | 0.11 |
-| MMAudio | 7.42 | 116.92 | 1.77 | 21.00 | 6.18 | 3.17 | 4.03 | 5.61 | 0.33 | 0.47 | 0.25 |
-| ThinkSound | 8.46 | 67.18 | 1.90 | 11.11 | 5.98 | 3.61 | 3.81 | 5.33 | 0.24 | 0.57 | 0.16 |
-| **HiFi-Foley (ours)** | **11.34** | **145.22** | **2.14** | **16.14** | **6.40** | **2.78** | **3.99** | **5.79** | **0.36** | **0.53** | **0.24** |
 
 
 
