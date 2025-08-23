@@ -11,9 +11,9 @@
 <div align="center" style="margin: 20px 0;">
   
 [![Project Page](https://img.shields.io/badge/🌐_Project-Page-green.svg?style=for-the-badge)](https://szczesnys.github.io/hunyuanvideo-foley)
-[![Code](https://img.shields.io/badge/💻_Code-GitHub-blue.svg?style=for-the-badge&logo=github)](https://github.com/Tencent-Hunyuan/HunyuanVideo-Foley)
-[![Paper](https://img.shields.io/badge/📄_Paper-arXiv-red.svg?style=for-the-badge&logo=arxiv)](https://arxiv.org/abs/2506.17201)
-[![Model](https://img.shields.io/badge/🤗_Model-Huggingface-yellow.svg?style=for-the-badge&logo=huggingface)](https://huggingface.co/tencent/HunyuanVideo-Foley)
+[![Code](https://img.shields.io/badge/Code-GitHub-blue.svg?style=for-the-badge&logo=github)](https://github.com/Tencent-Hunyuan/HunyuanVideo-Foley)
+[![Paper](https://img.shields.io/badge/Paper-arXiv-red.svg?style=for-the-badge&logo=arxiv)](https://arxiv.org/abs/2506.17201)
+[![Model](https://img.shields.io/badge/Model-Huggingface-yellow.svg?style=for-the-badge&logo=huggingface)](https://huggingface.co/tencent/HunyuanVideo-Foley)
 
 </div>
 
