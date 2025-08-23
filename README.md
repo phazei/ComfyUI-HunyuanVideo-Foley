@@ -36,7 +36,7 @@
 
 <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 20px; border-radius: 15px; margin: 20px 0;">
 
-**Sizhe Shan**<sup>1,2*</sup> • **Qiulin Li**<sup>1,3*</sup> • **Yutao Cui**<sup>1</sup> • **Miles Yang**<sup>1</sup> • **Zhao Zhong**<sup>1</sup> • **Yuehai Wang**<sup>2</sup> • **Qun Yang**<sup>3</sup> • **Jin Zhou**<sup>1†</sup>
+**Sizhe Shan**<sup>1,2*</sup> • **Qiulin Li**<sup>1,3*</sup> • **Yutao Cui**<sup>1</sup> • **Miles Yang**<sup>1</sup>  • **Yuehai Wang**<sup>2</sup> • **Qun Yang**<sup>3</sup> • **Jin Zhou**<sup>1†</sup> • **Zhao Zhong**<sup>1</sup>
 
 </div>
 
@@ -44,7 +44,7 @@
   
 🏢 <sup>1</sup>**Tencent Hunyuan** • 🎓 <sup>2</sup>**Zhejiang University** • ✈️ <sup>3</sup>**Nanjing University of Aeronautics and Astronautics**
 
-*Equal contribution • †Corresponding author
+*Equal contribution • †Project lead
 
 </div>
 
