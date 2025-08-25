@@ -61,9 +61,7 @@
 
 <div style="border: 3px solid #4A90E2; border-radius: 15px; padding: 10px; margin: 20px 0; background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);">
   
-  <!-- <video src="https://github.com/user-attachments/assets/d8548970-4271-49eb-833d-1d346f5f31e0" width="80%" controls style="border-radius: 10px; box-shadow: 0 8px 32px rgba(0,0,0,0.1);"> </video> -->
-  <video src="https://github.com/Tencent-Hunyuan/HunyuanVideo-Foley/releases/download/v0.1/demo_1.mov" width="80%" controls style="border-radius: 10px; box-shadow: 0 8px 32px rgba(0,0,0,0.1);"> </video>
-  
+  <video src="https://github.com/user-attachments/assets/087a4b59-8b22-4b7a-bac3-8f5d5a9972fe" width="80%" controls style="border-radius: 10px; box-shadow: 0 8px 32px rgba(0,0,0,0.1);"> </video>
   
   <p><em>🎬 Watch how HunyuanVideo-Foley generates immersive sound effects synchronized with video content</em></p>
   
