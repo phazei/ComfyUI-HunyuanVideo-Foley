@@ -374,40 +374,51 @@ If you find **HunyuanVideo-Foley** useful for your research, please consider cit
 
 </div>
 
-<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin: 20px 0;">
+<table align="center" style="width: 100%; border: none; margin: 20px 0;">
+<tr>
+<td align="center" style="width: 33%; padding: 10px; vertical-align: top;">
 
-<div style="background: linear-gradient(135deg, #ff9a9e 0%, #fecfef 100%); padding: 15px; border-radius: 10px; text-align: center;">
-  
 🎨 **[Stable Diffusion 3](https://huggingface.co/stabilityai/stable-diffusion-3-medium)**  
 *Foundation diffusion models*
 
-</div>
+</td>
+<td align="center" style="width: 33%; padding: 10px; vertical-align: top;">
 
-<div style="background: linear-gradient(135deg, #a8edea 0%, #fed6e3 100%); padding: 15px; border-radius: 10px; text-align: center;">
-  
 ⚡ **[FLUX](https://github.com/black-forest-labs/flux)**  
 *Advanced generation techniques*
 
-</div>
+</td>
+<td align="center" style="width: 33%; padding: 10px; vertical-align: top;">
 
-<div style="background: linear-gradient(135deg, #ffecd2 0%, #fcb69f 100%); padding: 15px; border-radius: 10px; text-align: center;">
-  
 🎵 **[MMAudio](https://github.com/hkchengrex/MMAudio)**  
 *Multimodal audio generation*
 
-</div>
+</td>
+</tr>
+<tr>
+<td align="center" style="width: 33%; padding: 10px; vertical-align: top;">
 
-<div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px; border-radius: 10px; text-align: center;">
-  
 🤗 **[HuggingFace](https://huggingface.co)**  
 *Platform & diffusers library*
 
-</div>
+</td>
+<td align="center" style="width: 33%; padding: 10px; vertical-align: top;">
 
-</div>
+🗜️ **[DAC](https://github.com/descriptinc/descript-audio-codec)**  
+*High-Fidelity Audio Compression*
+
+</td>
+<td align="center" style="width: 33%; padding: 10px; vertical-align: top;">
+
+🔗 **[Synchformer](https://github.com/v-iashin/Synchformer)**  
+*Audio-Visual Synchronization*
+
+</td>
+</tr>
+</table>
 
 <div align="center" style="background: linear-gradient(135deg, #74b9ff 0%, #0984e3 100%); color: white; padding: 20px; border-radius: 15px; margin: 20px 0;">
-  
+
 **🌟 Special thanks to all researchers and developers who contribute to the advancement of AI-generated audio and multimodal learning!**
 
 </div>
@@ -420,7 +431,7 @@ If you find **HunyuanVideo-Foley** useful for your research, please consider cit
 
 [![GitHub](https://img.shields.io/badge/GitHub-Follow-black?style=for-the-badge&logo=github)](https://github.com/Tencent-Hunyuan)
 [![Twitter](https://img.shields.io/badge/Twitter-Follow-blue?style=for-the-badge&logo=twitter)](https://twitter.com/Tencent)
-[![WeChat](https://img.shields.io/badge/WeChat-HunyuanAI-green?style=for-the-badge&logo=wechat)](https://hunyuan.ai)
+[![Hunyuan](https://img.shields.io/badge/Website-HunyuanAI-green?style=for-the-badge&logo=hunyuan)](https://hunyuan.tencent.com/)
 
 <p style="color: #666; margin-top: 15px; font-size: 14px;">
   
