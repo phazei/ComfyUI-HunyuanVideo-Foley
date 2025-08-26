@@ -12,7 +12,7 @@
   
 [![Project Page](https://img.shields.io/badge/🌐_Project-Page-green.svg?style=for-the-badge)](https://szczesnys.github.io/hunyuanvideo-foley)
 [![Code](https://img.shields.io/badge/Code-GitHub-blue.svg?style=for-the-badge&logo=github)](https://github.com/Tencent-Hunyuan/HunyuanVideo-Foley)
-[![Paper](https://img.shields.io/badge/Paper-arXiv-red.svg?style=for-the-badge&logo=arxiv)](https://arxiv.org/abs/2506.17201)
+[![Paper](https://img.shields.io/badge/Paper-arXiv-red.svg?style=for-the-badge&logo=arxiv)](https://arxiv.org/abs/2508.16930)
 [![Model](https://img.shields.io/badge/Model-Huggingface-yellow.svg?style=for-the-badge&logo=huggingface)](https://huggingface.co/tencent/HunyuanVideo-Foley)
 
 </div>
@@ -284,8 +284,23 @@ pip install -r requirements.txt
 
 <div style="background: #d1ecf1; padding: 15px; border-radius: 8px; border-left: 4px solid #17a2b8; margin: 10px 0;">
 
-🔗 **Model weights and detailed download instructions will be available soon!**  
-<!-- The details of download pretrained models are shown [here](ckpts/README.md). -->
+🔗 **Download Model weights from Huggingface**  
+```bash
+# using git-lfs
+git clone https://huggingface.co/tencent/HunyuanVideo-Foley
+
+# using huggingface-cli
+huggingface-cli download tencent/HunyuanVideo-Foley
+```
+
+<!-- 🔗 **Download Model weights from ModelScope**   -->
+<!-- ```bash -->
+<!-- # using git-lfs -->
+<!-- git clone https://huggingface.co/tencent/HunyuanVideo-Foley -->
+<!--  -->
+<!-- # using huggingface-cli -->
+<!-- huggingface-cli download tencent/HunyuanVideo-Foley -->
+<!-- ``` -->
 
 </div>
 
@@ -304,7 +319,7 @@ Generate Foley audio for a single video file with text description:
 
 ```bash
 python3 infer.py \
-    --model-path MODEL_PATH_DIR \
+    --model_path PRETRAINED_MODEL_PATH_DIR \
     --config_path ./configs/hunyuanvideo-foley-xxl.yaml \
     --single_video video_path \
     --single_prompt "audio description" \
@@ -321,7 +336,7 @@ Process multiple videos using a CSV file with video paths and descriptions:
 
 ```bash
 python3 infer.py \
-    --model_path MODEL_PATH_DIR \
+    --model_path PRETRAINED_MODEL_PATH_DIR \
     --config_path ./configs/hunyuanvideo-foley-xxl.yaml \
     --csv_path assets/test.csv \
     --output_dir OUTPUT_DIR
@@ -336,6 +351,7 @@ Launch a user-friendly Gradio web interface for easy interaction:
 </div>
 
 ```bash
+export HIFI_FOLEY_MODEL_PATH=PRETRAINED_MODEL_PATH_DIR
 python3 gradio_app.py
 ```
 
@@ -356,11 +372,14 @@ If you find **HunyuanVideo-Foley** useful for your research, please consider cit
 </div>
 
 ```bibtex
-@article{hunyuanvideo-foley2025,
-  title={HunyuanVideo-Foley: Multimodal Diffusion with Representation Alignment for High-Fidelity Foley Audio Generation},
-  author={Sizhe Shan and Qiulin Li and Yutao Cui and Miles Yang and Zhao Zhong and Yuehai Wang and Qun Yang and Jin Zhou},
-  journal={arXiv preprint arXiv:2506.17201},
-  year={2025}
+@misc{shan2025hunyuanvideofoleymultimodaldiffusionrepresentation,
+      title={HunyuanVideo-Foley: Multimodal Diffusion with Representation Alignment for High-Fidelity Foley Audio Generation}, 
+      author={Sizhe Shan and Qiulin Li and Yutao Cui and Miles Yang and Yuehai Wang and Qun Yang and Jin Zhou and Zhao Zhong},
+      year={2025},
+      eprint={2508.16930},
+      archivePrefix={arXiv},
+      primaryClass={eess.AS},
+      url={https://arxiv.org/abs/2508.16930}, 
 }
 ```
 
