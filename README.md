@@ -8,14 +8,15 @@
   <strong>Professional-grade AI sound effect generation for video content creators</strong>
 </p>
 
-<div align="center" style="margin: 20px 0;">
-  
-[![Project Page](https://img.shields.io/badge/🌐_Project-Page-green.svg?style=for-the-badge)](https://szczesnys.github.io/hunyuanvideo-foley)
-[![Code](https://img.shields.io/badge/Code-GitHub-blue.svg?style=for-the-badge&logo=github)](https://github.com/Tencent-Hunyuan/HunyuanVideo-Foley)
-[![Paper](https://img.shields.io/badge/Paper-arXiv-red.svg?style=for-the-badge&logo=arxiv)](https://arxiv.org/abs/2508.16930)
-[![Model](https://img.shields.io/badge/Model-Huggingface-yellow.svg?style=for-the-badge&logo=huggingface)](https://huggingface.co/tencent/HunyuanVideo-Foley)
-
+<div align="center">
+  <a href=https://github.com/Tencent-Hunyuan/HunyuanVideo-Foley target="_blank"><img src=https://img.shields.io/static/v1?label=Code&message=Github&color=blue height=22px></a>
+  <a href=https://szczesnys.github.io/hunyuanvideo-foley target="_blank"><img src=https://img.shields.io/badge/Page-bb8a2e.svg?logo=github height=22px></a>
+  <a href=https://huggingface.co/tencent/HunyuanVideo-Foley target="_blank"><img src=https://img.shields.io/badge/%F0%9F%A4%97%20Models-d96902.svg height=22px></a>
+  <a href=https://huggingface.co/spaces/tencent/HunyuanVideo-Foley  target="_blank"><img src=https://img.shields.io/badge/%F0%9F%A4%97%20Demo-276cb4.svg height=22px></a>
+  <a href=https://arxiv.org/abs/2508.16930 target="_blank"><img src=https://img.shields.io/badge/Report-b5212f.svg?logo=arxiv height=22px></a>
+  <a href=https://x.com/TencentHunyuan target="_blank"><img src=https://img.shields.io/badge/Hunyuan-black.svg?logo=x height=22px></a>
 </div>
+
 
 <div align="center" style="margin: 30px 0;">
   
