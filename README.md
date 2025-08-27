@@ -1,6 +1,6 @@
 <div align="center">
-  
-# 🎬 HunyuanVideo-Foley
+
+<img src="assets/logo.png" alt="HunyuanVideo-Foley Logo" width="400">
 
 <h4>Multimodal Diffusion with Representation Alignment for High-Fidelity Foley Audio Generation</h4>
 
