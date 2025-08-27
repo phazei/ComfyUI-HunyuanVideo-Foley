@@ -9,7 +9,7 @@
 </p>
 
 <div align="center">
-  <a href=https://github.com/Tencent-Hunyuan/HunyuanVideo-Foley target="_blank"><img src=https://img.shields.io/static/v1?label=Code&message=Github&color=blue height=22px></a>
+  <a href=https://github.com/Tencent-Hunyuan/HunyuanVideo-Foley target="_blank"><img src=https://img.shields.io/badge/Code-black.svg?logo=github height=22px></a>
   <a href=https://szczesnys.github.io/hunyuanvideo-foley target="_blank"><img src=https://img.shields.io/badge/Page-bb8a2e.svg?logo=github height=22px></a>
   <a href=https://huggingface.co/tencent/HunyuanVideo-Foley target="_blank"><img src=https://img.shields.io/badge/%F0%9F%A4%97%20Models-d96902.svg height=22px></a>
   <a href=https://huggingface.co/spaces/tencent/HunyuanVideo-Foley  target="_blank"><img src=https://img.shields.io/badge/%F0%9F%A4%97%20Demo-276cb4.svg height=22px></a>
