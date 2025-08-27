@@ -61,7 +61,7 @@
 
 <div style="border: 3px solid #4A90E2; border-radius: 15px; padding: 10px; margin: 20px 0; background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);">
   
-  <video src="https://github.com/user-attachments/assets/ffc0d0e5-a8dd-4e7f-9a53-c321cb8a2db6" width="80%" controls style="border-radius: 10px; box-shadow: 0 8px 32px rgba(0,0,0,0.1);"> </video>
+  <video src="https://github.com/user-attachments/assets/d6e1b6fd-6980-4a68-8717-74298d064195" width="80%" controls style="border-radius: 10px; box-shadow: 0 8px 32px rgba(0,0,0,0.1);"> </video>
   
   <p><em>🎬 Watch how HunyuanVideo-Foley generates immersive sound effects synchronized with video content</em></p>
   
