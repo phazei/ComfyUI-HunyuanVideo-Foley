@@ -26,3 +26,4 @@ assets/MovieGenAudioBenchSfx/video_with_audio/8.mp4 filter=lfs diff=lfs merge=lf
 assets/MovieGenAudioBenchSfx/video_with_audio/9.mp4 filter=lfs diff=lfs merge=lfs -text
 assets/data_pipeline.png filter=lfs diff=lfs merge=lfs -text
 assets/model_arch.png filter=lfs diff=lfs merge=lfs -text
+*.png filter=lfs diff=lfs merge=lfs -text
