@@ -2,7 +2,7 @@
   
 # 🎬 HunyuanVideo-Foley
 
-<h3>Multimodal Diffusion with Representation Alignment for High-Fidelity Foley Audio Generation</h3>
+<h4>Multimodal Diffusion with Representation Alignment for High-Fidelity Foley Audio Generation</h4>
 
 <p align="center">
   <strong>Professional-grade AI sound effect generation for video content creators</strong>
@@ -61,7 +61,7 @@
 
 <div style="border: 3px solid #4A90E2; border-radius: 15px; padding: 10px; margin: 20px 0; background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);">
   
-  <video src="https://github.com/user-attachments/assets/087a4b59-8b22-4b7a-bac3-8f5d5a9972fe" width="80%" controls style="border-radius: 10px; box-shadow: 0 8px 32px rgba(0,0,0,0.1);"> </video>
+  <video src="https://github.com/user-attachments/assets/ffc0d0e5-a8dd-4e7f-9a53-c321cb8a2db6" width="80%" controls style="border-radius: 10px; box-shadow: 0 8px 32px rgba(0,0,0,0.1);"> </video>
   
   <p><em>🎬 Watch how HunyuanVideo-Foley generates immersive sound effects synchronized with video content</em></p>
   
@@ -98,9 +98,9 @@ Professional-grade audio generation with crystal clarity
 
 ## 📄 **Abstract**
 
-<div align="center" style="background: linear-gradient(135deg, #ffeef8 0%, #f0f8ff 100%); padding: 30px; border-radius: 20px; margin: 20px 0; border-left: 5px solid #ff6b9d;">
+<div align="center" style="background: linear-gradient(135deg, #ffeef8 0%, #f0f8ff 100%); padding: 30px; border-radius: 20px; margin: 20px 0; border-left: 5px solid #ff6b9d; color: #333;">
 
-**🚀 Tencent Hunyuan** proudly open-sources **HunyuanVideo-Foley** - an end-to-end video sound effect generation model! 
+**🚀 Tencent Hunyuan** open-sources **HunyuanVideo-Foley** an end-to-end video sound effect generation model! 
 
 *A professional-grade AI tool specifically designed for video content creators, widely applicable to diverse scenarios including short video creation, film production, advertising creativity, and game development.*
 
@@ -110,21 +110,21 @@ Professional-grade audio generation with crystal clarity
 
 <div style="display: grid; grid-template-columns: 1fr; gap: 15px; margin: 20px 0;">
 
-<div style="border-left: 4px solid #4CAF50; padding: 15px; background: #f8f9fa; border-radius: 8px;">
+<div style="border-left: 4px solid #4CAF50; padding: 15px; background: #f8f9fa; border-radius: 8px; color: #333;">
   
 **🎬 Multi-scenario Audio-Visual Synchronization**  
 Supports generating high-quality audio that is synchronized and semantically aligned with complex video scenes, enhancing realism and immersive experience for film/TV and gaming applications.
 
 </div>
 
-<div style="border-left: 4px solid #2196F3; padding: 15px; background: #f8f9fa; border-radius: 8px;">
+<div style="border-left: 4px solid #2196F3; padding: 15px; background: #f8f9fa; border-radius: 8px; color: #333;">
   
 **⚖️ Multi-modal Semantic Balance**  
 Intelligently balances visual and textual information analysis, comprehensively orchestrates sound effect elements, avoids one-sided generation, and meets personalized dubbing requirements.
 
 </div>
 
-<div style="border-left: 4px solid #FF9800; padding: 15px; background: #f8f9fa; border-radius: 8px;">
+<div style="border-left: 4px solid #FF9800; padding: 15px; background: #f8f9fa; border-radius: 8px; color: #333;">
   
 **🎵 High-fidelity Audio Output**  
 Self-developed 48kHz audio VAE perfectly reconstructs sound effects, music, and vocals, achieving professional-grade audio generation quality.
@@ -133,7 +133,7 @@ Self-developed 48kHz audio VAE perfectly reconstructs sound effects, music, and 
 
 </div>
 
-<div align="center" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 15px; margin: 20px 0;">
+<div align="center" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 15px; margin: 20px 0; color: #333;">
   
 **🏆 SOTA Performance Achieved**
 
@@ -154,7 +154,7 @@ Self-developed 48kHz audio VAE perfectly reconstructs sound effects, music, and 
 
 ### 📊 **Data Pipeline Design**
 
-<div align="center" style="margin: 20px 0;">
+<div align="center" style="margin: 20px 0; color: #333;">
   
 ![Data Pipeline](assets/data_pipeline.png)
 *🔄 Comprehensive data processing pipeline for high-quality text-video-audio datasets*
@@ -169,7 +169,7 @@ The **TV2A (Text-Video-to-Audio)** task presents a complex multimodal generation
 
 ### 🏗️ **Model Architecture**
 
-<div align="center" style="margin: 20px 0;">
+<div align="center" style="margin: 20px 0; color: #333;">
   
 ![Model Architecture](assets/model_arch.png)
 *🧠 HunyuanVideo-Foley hybrid architecture with multimodal and unimodal transformer blocks*
@@ -210,7 +210,7 @@ The **TV2A (Text-Video-to-Audio)** task presents a complex multimodal generation
 | Frieren | 5.71 | 2.81 | 3.47 | 5.31 | 0.18 | 1.39 | 0.16 | 2.92±0.95 | 2.76±1.20 | 2.94±1.26 |
 | MMAudio | 6.17 | 2.84 | 3.59 | 5.62 | 0.27 | 0.80 | 0.35 | 3.58±0.84 | 3.63±1.00 | 3.47±1.03 |
 | ThinkSound | 6.04 | 3.73 | 3.81 | 5.59 | 0.18 | 0.91 | 0.20 | 3.20±0.97 | 3.01±1.04 | 3.02±1.08 |
-| **🥇 HiFi-Foley (ours)** | **🟢 6.59** | **🟢 2.74** | **🟢 3.88** | **🟢 6.13** | **🟢 0.35** | **🟢 0.74** | **🟢 0.33** | **🟢 4.14±0.68** | **🟢 4.12±0.77** | **🟢 4.15±0.75** |
+| **HunyuanVideo-Foley (ours)** | **6.59** | **2.74** | **3.88** | **6.13** | **0.35** | **0.74** | **0.33** | **4.14±0.68** | **4.12±0.77** | **4.15±0.75** |
 
 </div>
 
@@ -232,11 +232,11 @@ The **TV2A (Text-Video-to-Audio)** task presents a complex multimodal generation
 | Frieren | 16.86 | 293.57 | 2.95 | 7.32 | 5.72 | 2.55 | 2.88 | 5.10 | 0.21 | 0.86 | 0.16 |
 | MMAudio | 9.01 | 205.85 | 2.17 | 9.59 | 5.94 | 2.91 | 3.30 | 5.39 | 0.30 | 0.56 | 0.27 |
 | ThinkSound | 9.92 | 228.68 | 2.39 | 6.86 | 5.78 | 3.23 | 3.12 | 5.11 | 0.22 | 0.67 | 0.22 |
-| **🥇 HiFi-Foley (ours)** | **🟢 6.07** | **🟢 202.12** | **🟢 1.89** | **🟢 8.30** | **🟢 6.12** | **🟢 2.76** | **🟢 3.22** | **🟢 5.53** | **🟢 0.38** | **🟢 0.54** | **🟢 0.24** |
+| **HunyuanVideo-Foley (ours)** | **6.07** | **202.12** | **1.89** | **8.30** | **6.12** | **2.76** | **3.22** | **5.53** | **0.38** | **0.54** | **0.24** |
 
 </div>
 
-<div align="center" style="background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%); color: white; padding: 15px; border-radius: 10px; margin: 20px 0;">
+<div align="center" style="background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%); color: white; padding: 15px; border-radius: 10px; margin: 20px 0; color: #333;">
   
 **🎉 Outstanding Results!** HunyuanVideo-Foley achieves the best scores across **ALL** evaluation metrics, demonstrating significant improvements in audio quality, synchronization, and semantic alignment.
 
@@ -250,7 +250,7 @@ The **TV2A (Text-Video-to-Audio)** task presents a complex multimodal generation
 
 ### 📦 **Installation**
 
-<div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 15px; margin: 20px 0;">
+<div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 15px; margin: 20px 0; color: #333;">
 
 **🔧 System Requirements**
 - **CUDA**: 12.4 or 11.8 recommended
@@ -269,7 +269,7 @@ cd HunyuanVideo-Foley
 
 #### **Step 2: Environment Setup**
 
-<div style="background: #fff3cd; padding: 15px; border-radius: 8px; border-left: 4px solid #ffc107; margin: 10px 0;">
+<div style="background: #fff3cd; padding: 15px; border-radius: 8px; border-left: 4px solid #ffc107; margin: 10px 0; color: #333;">
 
 💡 **Tip**: We recommend using [Conda](https://docs.anaconda.com/free/miniconda/index.html) for Python environment management.
 
@@ -282,7 +282,7 @@ pip install -r requirements.txt
 
 #### **Step 3: Download Pretrained Models**
 
-<div style="background: #d1ecf1; padding: 15px; border-radius: 8px; border-left: 4px solid #17a2b8; margin: 10px 0;">
+<div style="background: #d1ecf1; padding: 15px; border-radius: 8px; border-left: 4px solid #17a2b8; margin: 10px 0;color: #333;">
 
 🔗 **Download Model weights from Huggingface**  
 ```bash
@@ -311,7 +311,7 @@ huggingface-cli download tencent/HunyuanVideo-Foley
 
 ### 🎬 **Single Video Generation**
 
-<div style="background: #e8f5e8; padding: 15px; border-radius: 8px; border-left: 4px solid #28a745; margin: 10px 0;">
+<div style="background: #e8f5e8; padding: 15px; border-radius: 8px; border-left: 4px solid #28a745; margin: 10px 0;color: #333;">
 
 Generate Foley audio for a single video file with text description:
 
@@ -328,7 +328,7 @@ python3 infer.py \
 
 ### 📂 **Batch Processing**
 
-<div style="background: #fff3e0; padding: 15px; border-radius: 8px; border-left: 4px solid #ff9800; margin: 10px 0;">
+<div style="background: #fff3e0; padding: 15px; border-radius: 8px; border-left: 4px solid #ff9800; margin: 10px 0;color: #333;">
 
 Process multiple videos using a CSV file with video paths and descriptions:
 
@@ -344,7 +344,7 @@ python3 infer.py \
 
 ### 🌐 **Interactive Web Interface**
 
-<div style="background: #f3e5f5; padding: 15px; border-radius: 8px; border-left: 4px solid #9c27b0; margin: 10px 0;">
+<div style="background: #f3e5f5; padding: 15px; border-radius: 8px; border-left: 4px solid #9c27b0; margin: 10px 0;color: #333;">
 
 Launch a user-friendly Gradio web interface for easy interaction:
 
@@ -355,7 +355,7 @@ export HIFI_FOLEY_MODEL_PATH=PRETRAINED_MODEL_PATH_DIR
 python3 gradio_app.py
 ```
 
-<div align="center" style="margin: 20px 0;">
+<div align="center" style="margin: 20px 0; color: #333;">
   
 *🚀 Then open your browser and navigate to the provided local URL to start generating Foley audio!*
 
@@ -365,7 +365,7 @@ python3 gradio_app.py
 
 ## 📚 **Citation**
 
-<div style="background: #f8f9fa; padding: 20px; border-radius: 10px; border-left: 4px solid #6c757d; margin: 20px 0;">
+<div style="background: #f8f9fa; padding: 20px; border-radius: 10px; border-left: 4px solid #6c757d; margin: 20px 0; color: #333;">
 
 If you find **HunyuanVideo-Foley** useful for your research, please consider citing our paper:
 
@@ -436,7 +436,7 @@ If you find **HunyuanVideo-Foley** useful for your research, please consider cit
 </tr>
 </table>
 
-<div align="center" style="background: linear-gradient(135deg, #74b9ff 0%, #0984e3 100%); color: white; padding: 20px; border-radius: 15px; margin: 20px 0;">
+<div align="center" style="background: linear-gradient(135deg, #74b9ff 0%, #0984e3 100%); color: white; padding: 20px; border-radius: 15px; margin: 20px 0;, color: #333;">
 
 **🌟 Special thanks to all researchers and developers who contribute to the advancement of AI-generated audio and multimodal learning!**
 
