@@ -247,7 +247,7 @@ The **TV2A (Text-Video-to-Audio)** task presents a complex multimodal generation
 - **CUDA**: 12.4 or 11.8 recommended
 - **Python**: 3.8+ 
 - **OS**: Linux (primary support)
-- Note: This model requires approximately 20GB of VRAM for inference. It is recommended to use a GPU with ​more tha 24GB of VRAM​ (such as RTX 3090 or 4090) for stable performance.
+- Note: This model requires approximately 20GB of VRAM for inference. It is recommended to use a GPU >= 24GB of VRAM​ (such as RTX 3090 or 4090) for stable performance.
 
 </div>
 
