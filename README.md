@@ -23,7 +23,6 @@
 ![Stars](https://img.shields.io/github/stars/Tencent-Hunyuan/HunyuanVideo-Foley?style=social)
 ![Forks](https://img.shields.io/github/forks/Tencent-Hunyuan/HunyuanVideo-Foley?style=social)
 ![Issues](https://img.shields.io/github/issues/Tencent-Hunyuan/HunyuanVideo-Foley?style=flat-square)
-![License](https://img.shields.io/github/license/Tencent-Hunyuan/HunyuanVideo-Foley?style=flat-square)
 
 </div>
 
