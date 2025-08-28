@@ -17,15 +17,6 @@
   <a href=https://x.com/TencentHunyuan target="_blank"><img src=https://img.shields.io/badge/Hunyuan-black.svg?logo=x height=22px></a>
 </div>
 
-
-<div align="center" style="margin: 30px 0;">
-  
-![Stars](https://img.shields.io/github/stars/Tencent-Hunyuan/HunyuanVideo-Foley?style=social)
-![Forks](https://img.shields.io/github/forks/Tencent-Hunyuan/HunyuanVideo-Foley?style=social)
-![Issues](https://img.shields.io/github/issues/Tencent-Hunyuan/HunyuanVideo-Foley?style=flat-square)
-
-</div>
-
 </div>
 
 ---
