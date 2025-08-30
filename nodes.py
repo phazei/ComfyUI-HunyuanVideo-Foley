@@ -1,6 +1,8 @@
 import sys
 import os
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from loguru import logger
 from torchvision.transforms import v2
 from transformers import AutoTokenizer, AutoModel, ClapTextModelWithProjection
@@ -169,21 +171,122 @@ def feature_process_from_tensors(frames_8fps, frames_25fps, prompt, neg_prompt, 
     return visual_features, text_feats, audio_len_in_s
 
 # -----------------------------------------------------------------------------------
+# FP8 WEIGHT-ONLY QUANTIZATION HELPERS (storage in fp8, compute in fp16/bf16)
+# -----------------------------------------------------------------------------------
+class LinearFP8Wrapper(nn.Module):
+    """Wraps a Linear layer with FP8 weight *storage* and safe upcast at forward time.
+    - Weight is stored as float8 (e4m3fn/e5m2) to save VRAM.
+    - Forward upcasts weight (and bias) to the input dtype for matmul; compute stays in fp16/bf16.
+    This avoids unsupported Float8 promotion errors on Ampere while keeping memory wins.
+    """
+    def __init__(self, in_features:int, out_features:int, bias:torch.Tensor|None, quant_dtype:torch.dtype, device:torch.device):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.quant_dtype = quant_dtype
+        # Store weight as FP8 on the same device as the original module
+        self.weight = nn.Parameter(torch.empty((out_features, in_features), dtype=quant_dtype, device=device), requires_grad=False)
+        if bias is not None:
+            # Keep bias in higher precision (original dtype) for stability
+            self.bias = nn.Parameter(bias.detach().to(device=device), requires_grad=False)
+        else:
+            self.bias = None
+
+    @classmethod
+    def from_linear(cls, lin:nn.Linear, quant_dtype:torch.dtype):
+        dev = lin.weight.device
+        mod = cls(lin.in_features, lin.out_features, lin.bias, quant_dtype, dev)
+        with torch.no_grad():
+            mod.weight.copy_(lin.weight.detach().to(dtype=quant_dtype))
+        return mod
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Upcast weight to input dtype to ensure supported matmul kernels
+        w = self.weight.to(dtype=x.dtype)
+        b = self.bias
+        if b is not None and b.dtype != x.dtype:
+            b = b.to(dtype=x.dtype)
+        return F.linear(x, w, b)
+
+
+def _quantize_linears_to_fp8_inplace(module: nn.Module, quantization: str = "fp8_e4m3fn", min_features: int = 0):
+    """Recursively replace nn.Linear with LinearFP8Wrapper using the chosen FP8 storage dtype.
+    Only weight storage changes; compute remains in the runtime dtype by upcasting in forward.
+    """
+    if quantization == "fp8_e5m2":
+        qdtype = torch.float8_e5m2
+    else:
+        # default to e4m3fn (balanced dynamic range/precision for activations/weights in practice)
+        qdtype = torch.float8_e4m3fn
+
+    count = 0
+    saved_bytes = 0
+
+    def _replace(parent: nn.Module):
+        nonlocal count, saved_bytes
+        for name, child in list(parent.named_children()):
+            if isinstance(child, nn.Linear):
+                # Skip extremely small linears if desired
+                if max(child.in_features, child.out_features) < min_features:
+                    continue
+                # Estimate memory before/after (weights only)
+                orig = child.weight
+                before = orig.numel() * orig.element_size()  # bytes
+                wrapped = LinearFP8Wrapper.from_linear(child, qdtype)
+                setattr(parent, name, wrapped)
+                after = wrapped.weight.numel() * 1  # float8 is 1 byte/elt
+                count += 1
+                saved_bytes += max(0, before - after)
+            else:
+                _replace(child)
+
+    _replace(module)
+    return count, saved_bytes
+
+# -----------------------------------------------------------------------------------
+# DTYPE / QUANT DETECTION HELPERS
+# -----------------------------------------------------------------------------------
+
+def _detect_ckpt_fp8(state_dict):
+    """Return 'fp8_e5m2' / 'fp8_e4m3fn' if any tensor in the checkpoint uses that dtype; else None."""
+    detected = None
+    for v in state_dict.values():
+        if isinstance(v, torch.Tensor):
+            if v.dtype == torch.float8_e5m2:
+                detected = "fp8_e5m2"; break
+            if v.dtype == torch.float8_e4m3fn:
+                detected = "fp8_e4m3fn"; break
+    return detected
+
+
+def _detect_ckpt_major_precision(state_dict):
+    """Return torch dtype among {bf16, fp16, fp32} that dominates parameter sizes in the checkpoint."""
+    counts = {torch.bfloat16: 0, torch.float16: 0, torch.float32: 0}
+    for v in state_dict.values():
+        if isinstance(v, torch.Tensor):
+            if v.dtype in counts:
+                counts[v.dtype] += v.numel()
+    if all(c == 0 for c in counts.values()):
+        return torch.bfloat16
+    return max(counts, key=counts.get)
+
+# -----------------------------------------------------------------------------------
 # NODE 1: Hunyuan Model Loader
 # -----------------------------------------------------------------------------------
 class HunyuanModelLoader:
     @classmethod
     def INPUT_TYPES(cls):
-        return {"required": {"model_name": (folder_paths.get_filename_list("foley"),), "precision": (["bf16", "fp16", "fp32"], {"default": "bf16"})}}
+        return {"required": {"model_name": (folder_paths.get_filename_list("foley"),), "precision": (["auto", "bf16", "fp16", "fp32"], {"default": "bf16", "tooltip": "Compute dtype for non-quantized params and autocast (auto = detect from checkpoint)"}), "quantization": (["none", "fp8_e4m3fn", "fp8_e5m2", "auto"], {"default": "none", "tooltip": "FP8 weight-only storage for Linear layers, saves a few GB VRAM (compute still fp16/bf16)"})}}
 
     RETURN_TYPES = ("HUNYUAN_MODEL",)
     FUNCTION = "load_model"
     CATEGORY = "audio/HunyuanFoley"
 
-    def load_model(self, model_name, precision):
+    def load_model(self, model_name, precision, quantization):
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
-        dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[precision]
+        # dtype resolved after checkpoint is loaded if precision == 'auto'
+        dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}.get(precision, torch.bfloat16)
 
         model_path = folder_paths.get_full_path("foley", model_name)
         config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs", "hunyuanvideo-foley-xxl.yaml")
@@ -192,6 +295,12 @@ class HunyuanModelLoader:
 
         # Load weights onto the offload device first to save VRAM
         state_dict = load_torch_file(model_path, device=offload_device)
+
+        # Auto-detect quantization and precision from checkpoint
+        detected_fp8 = _detect_ckpt_fp8(state_dict)
+        if precision == "auto":
+            dtype = _detect_ckpt_major_precision(state_dict)
+            logger.info(f"Auto precision selected from checkpoint: {str(dtype)}")
 
         # Initialize the model structure on the 'meta' device (no memory allocated yet)
         with init_empty_weights():
@@ -205,6 +314,18 @@ class HunyuanModelLoader:
         # Ensure the runtime parameter dtype matches the requested precision
         foley_model.to(dtype=dtype)
         foley_model.eval()
+
+        # NEW: Optional FP8 weight-only quantization for Linear layers (Ampere-safe)
+        if quantization != "none":
+            # Choose quantization mode (auto = honor fp8 tensors if present, else default to e4m3fn)
+            if quantization == "auto":
+                qmode = detected_fp8 if detected_fp8 is not None else "fp8_e4m3fn"
+            else:
+                qmode = quantization
+            count, saved = _quantize_linears_to_fp8_inplace(foley_model, qmode, min_features=0)
+            gb = saved / (1024**3)
+            logger.info(f"Applied {qmode} weight-only quantization to {count} Linear layers; ~{gb:.2f} GB saved on weights.")
+            # IMPORTANT: Avoid calling model.to(dtype=...) after this point; it would upcast FP8-stored weights and lose savings.
 
         logger.info(f"Loaded HunyuanVideoFoley main model: {model_name}")
         return (foley_model,)
@@ -398,6 +519,7 @@ class HunyuanFoleySampler:
         }
 
         # Combine all necessary model components into one dictionary for the denoiser
+        # Avoid mutating shared deps; shallow-copy into a fresh AttributeDict for this call
         model_dict_for_process = AttributeDict(dict(hunyuan_deps))
         model_dict_for_process['foley_model'] = hunyuan_model
         model_dict_for_process['device'] = device
