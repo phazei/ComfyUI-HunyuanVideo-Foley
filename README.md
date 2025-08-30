@@ -1,6 +1,8 @@
-# ComfyUI – HunyuanVideo‑Foley (Hybrid)
+# ComfyUI – HunyuanVideo‑Foley Video to Audio
 
 A tidy set of nodes for **Tencent HunyuanVideo‑Foley** that runs on modest GPUs and scales up nicely.
+
+![Workflow Diagram](./example_workflows/HunyuanVideoFoleyExample.png)
 
 ## Node overview (start here)
 

@@ -1,7 +1,7 @@
 [project]
 name = "ComfyUI-HunyuanVideo-Foley"
 description = "Generate Audio from any video and or text"
-version = "1.0.0"
+version = "1.0.3"
 license = {file = "LICENSE"}
 
 [project.urls]
