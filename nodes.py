@@ -45,6 +45,21 @@ except ImportError as e:
 # compatible with ComfyUI's data flow (e.g., accepting a torch.Generator).
 # -----------------------------------------------------------------------------------
 
+def _caps(model_dict, cfg):
+    tokmax = int(getattr(getattr(model_dict, "clap_tokenizer", None), "model_max_length", 10**9) or 10**9)
+    posmax = int(getattr(getattr(getattr(model_dict, "clap_model", None), "config", None), "max_position_embeddings", 10**9) or 10**9)
+    cfgmax = int(getattr(getattr(cfg, "model_config", None), "model_kwargs", {}).get("text_length", 10**9))
+    return min(tokmax, posmax, cfgmax)
+
+def _pad_or_trim_time(x, T_fixed: int):
+    # x: [B, T_cur, D] -> [B, T_fixed, D]
+    B, T_cur, D = x.shape
+    if T_cur == T_fixed:
+        return x
+    if T_cur > T_fixed:
+        return x[:, :T_fixed, :]
+    return F.pad(x, (0, 0, 0, T_fixed - T_cur))
+
 def prepare_latents_with_generator(scheduler, batch_size, num_channels_latents, length, dtype, device, generator=None):
     """Creates the initial random noise tensor using a specified torch.Generator for reproducibility."""
     shape = (batch_size, num_channels_latents, int(length))
@@ -82,6 +97,34 @@ def denoise_process_with_generator(visual_feats, text_feats, audio_len_in_s, mod
     syncformer_feat_rep = visual_feats['syncformer_feat'].repeat(batch_size, 1, 1)
     text_feat_rep = text_feats['text_feat'].repeat(batch_size, 1, 1)
     uncond_text_rep = text_feats['uncond_text_feat'].repeat(batch_size, 1, 1)
+
+    # --- PAD EMBEDDINGS TOKENZIER ---
+
+    T_cur_len = int(text_feat_rep.shape[1])
+    cap   = _caps(model_dict, cfg)
+
+    # Two-bucket policy: 77 normally, 128 if prompt exceeds 77 (respect hard caps)
+    if T_cur_len <= 77:
+        T_fixed = min(77, cap)
+    else:
+        T_fixed = min(128, cap)
+
+    # Cache once per session to avoid flapping if prompts bounce around
+    if not hasattr(model_dict.foley_model, "_text_len_fixed"):
+        model_dict.foley_model._text_len_fixed = T_fixed
+    # If you prefer “sticky first bucket,” comment the next line.
+    else:
+        # stick to bigger bucket if it's triggered
+        model_dict.foley_model._text_len_fixed = max(model_dict.foley_model._text_len_fixed, T_fixed)
+
+    T_fixed = model_dict.foley_model._text_len_fixed
+    logger.info(f"Using T_FIXED bucket: {T_fixed} (prompt had {T_cur_len} tokens; cap {cap})")
+
+    # Normalize shapes for compile reuse
+    text_feat_rep   = _pad_or_trim_time(text_feat_rep,   T_fixed)
+    uncond_text_rep = _pad_or_trim_time(uncond_text_rep, T_fixed)
+
+
     uncond_siglip2_feat = model_dict.foley_model.get_empty_clip_sequence(bs=batch_size, len=siglip2_feat_rep.shape[1]).to(device)
     uncond_syncformer_feat = model_dict.foley_model.get_empty_sync_sequence(bs=batch_size, len=syncformer_feat_rep.shape[1]).to(device)
     if guidance_scale > 1.0:
