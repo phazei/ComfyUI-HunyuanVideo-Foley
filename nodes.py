@@ -255,9 +255,11 @@ def _detect_ckpt_fp8(state_dict):
     for v in state_dict.values():
         if isinstance(v, torch.Tensor):
             if v.dtype == torch.float8_e5m2:
-                detected = "fp8_e5m2"; break
+                detected = "fp8_e5m2"
+                break
             if v.dtype == torch.float8_e4m3fn:
-                detected = "fp8_e4m3fn"; break
+                detected = "fp8_e4m3fn"
+                break
     return detected
 
 

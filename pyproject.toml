@@ -1,0 +1,14 @@
+[project]
+name = "ComfyUI-HunyuanVideo-Foley"
+description = "Generate Audio from any video and or text"
+version = "1.0.0"
+license = {file = "LICENSE"}
+
+[project.urls]
+Repository = "https://github.com/phazei/ComfyUI-HunyuanVideo-Foley"
+#  Used by Comfy Registry https://comfyregistry.org
+
+[tool.comfy]
+PublisherId = "phazei"
+DisplayName = "ComfyUI-HunyuanVideo-Foley"
+Icon = ""

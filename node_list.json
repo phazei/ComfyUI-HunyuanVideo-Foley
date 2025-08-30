@@ -1,0 +1,7 @@
+{
+  "HunyuanModelLoader": "Load HunyuanVideo-Foley main diffusion model with precision/FP8 options",
+  "HunyuanDependenciesLoader": "Load DAC-VAE, SigLIP2, Synchformer, and CLAP dependencies",
+  "HunyuanFoleySampler": "Generate Foley audio (ping-pong memory, fast CFG, optional FP8)",
+  "HunyuanFoleyTorchCompile": "Optional torch.compile accelerator (~30% faster after first compile)",
+  "SelectAudioFromBatch": "Pick one waveform from an AUDIO batch"
+}
