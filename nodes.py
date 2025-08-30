@@ -33,7 +33,9 @@ try:
     from hunyuanvideo_foley.models.dac_vae.model.dac import DAC
     from hunyuanvideo_foley.models.synchformer import Synchformer
     from hunyuanvideo_foley.models.hifi_foley import HunyuanVideoFoley
-    from hunyuanvideo_foley.utils.feature_utils import encode_video_with_siglip2, encode_video_with_sync, encode_text_feat
+    from hunyuanvideo_foley.utils.feature_utils import (
+        encode_video_with_siglip2, encode_video_with_sync, encode_text_feat as _encode_text_feat_upstream
+    )
 except ImportError as e:
     logger.error(f"Failed to import HunyuanVideo-Foley modules: {e}")
     logger.error("Please ensure the ComfyUI_HunyuanVideoFoley custom node is installed correctly.")
@@ -44,6 +46,38 @@ except ImportError as e:
 # These are modified versions of the original library's functions to make them
 # compatible with ComfyUI's data flow (e.g., accepting a torch.Generator).
 # -----------------------------------------------------------------------------------
+
+def _caps(model_dict, cfg):
+    tokmax = int(getattr(getattr(model_dict, "clap_tokenizer", None), "model_max_length", 10**9) or 10**9)
+    posmax = int(getattr(getattr(getattr(model_dict, "clap_model", None), "config", None), "max_position_embeddings", 10**9) or 10**9)
+    cfgmax = int(getattr(getattr(cfg, "model_config", None), "model_kwargs", {}).get("text_length", 10**9))
+    return min(tokmax, posmax, cfgmax)
+
+def encode_text_feat(texts, deps, T_fixed:int|None=None):
+    if T_fixed is None:
+        hs, _ = _encode_text_feat_upstream(texts, deps)
+        return hs, None
+    tok = deps.clap_tokenizer(
+        texts,
+        padding="max_length",
+        truncation=True,
+        max_length=int(T_fixed),
+        return_tensors="pt",
+        return_attention_mask=True,
+    )
+    mask_cpu = tok["attention_mask"].clone()
+    tok = {k: v.to(deps.device) for k, v in tok.items()}
+    out = deps.clap_model(**tok, output_hidden_states=True, return_dict=True)
+    return out.last_hidden_state, mask_cpu  # hs:[B,T,D], mask:[B,T] (1=real, 0=pad)
+
+# def _pad_or_trim_time(x, T_fixed: int):
+#     # x: [B, T_cur, D] -> [B, T_fixed, D]
+#     B, T_cur, D = x.shape
+#     if T_cur == T_fixed:
+#         return x
+#     if T_cur > T_fixed:
+#         return x[:, :T_fixed, :]
+#     return F.pad(x, (0, 0, 0, T_fixed - T_cur))
 
 def prepare_latents_with_generator(scheduler, batch_size, num_channels_latents, length, dtype, device, generator=None):
     """Creates the initial random noise tensor using a specified torch.Generator for reproducibility."""
@@ -82,6 +116,43 @@ def denoise_process_with_generator(visual_feats, text_feats, audio_len_in_s, mod
     syncformer_feat_rep = visual_feats['syncformer_feat'].repeat(batch_size, 1, 1)
     text_feat_rep = text_feats['text_feat'].repeat(batch_size, 1, 1)
     uncond_text_rep = text_feats['uncond_text_feat'].repeat(batch_size, 1, 1)
+
+    # Repeat masks to match batch; bool on device
+    text_mask     = text_feats.get('text_mask')
+    uncond_mask   = text_feats.get('uncond_text_mask')
+    cond_mask_rep = None
+    if text_mask is not None and uncond_mask is not None:
+        tm  = text_mask.repeat(batch_size, 1).to(device=model_dict.device, dtype=torch.bool, non_blocking=True)
+        um  = uncond_mask.repeat(batch_size, 1).to(device=model_dict.device, dtype=torch.bool, non_blocking=True)
+        cond_mask_rep = torch.cat([um, tm], dim=0) if guidance_scale > 1.0 else tm
+
+
+    # --- PAD TEXT BEFORE TOKENZIER ---
+    # T_cur = int(text_feat_rep.shape[1])
+    # cap   = _caps(model_dict, cfg)
+
+    # # Two-bucket policy: 77 normally, 128 if prompt exceeds 77 (respect hard caps)
+    # if T_cur <= 77:
+    #     T_fixed = min(77, cap)
+    # else:
+    #     T_fixed = min(128, cap)
+
+    # # Cache once per session to avoid flapping if prompts bounce around
+    # if not hasattr(model_dict.foley_model, "_text_len_fixed"):
+    #     model_dict.foley_model._text_len_fixed = T_fixed
+    # # If you prefer “sticky first bucket,” comment the next line.
+    # else:
+    #     # stick to bigger bucket if it's triggered
+    #     model_dict.foley_model._text_len_fixed = max(model_dict.foley_model._text_len_fixed, T_fixed)
+
+    # T_fixed = model_dict.foley_model._text_len_fixed
+    # logger.info(f"Using T_FIXED bucket: {T_fixed} (prompt had {T_cur} tokens; cap {cap})")
+
+    # # Normalize shapes for compile reuse
+    # text_feat_rep   = _pad_or_trim_time(text_feat_rep,   T_fixed)
+    # uncond_text_rep = _pad_or_trim_time(uncond_text_rep, T_fixed)
+
+
     uncond_siglip2_feat = model_dict.foley_model.get_empty_clip_sequence(bs=batch_size, len=siglip2_feat_rep.shape[1]).to(device)
     uncond_syncformer_feat = model_dict.foley_model.get_empty_sync_sequence(bs=batch_size, len=syncformer_feat_rep.shape[1]).to(device)
     if guidance_scale > 1.0:
@@ -92,9 +163,13 @@ def denoise_process_with_generator(visual_feats, text_feats, audio_len_in_s, mod
         pre_siglip2_input = siglip2_feat_rep
         pre_sync_input = syncformer_feat_rep
         pre_text_input = text_feat_rep
+        
+    if hasattr(model_dict.foley_model, "use_attention_mask"):
+        model_dict.foley_model.use_attention_mask = cond_mask_rep is not None
+        # model_dict.foley_model.use_attention_mask = False
 
     pbar = comfy.utils.ProgressBar(len(timesteps))
-    with torch.inference_mode():  # NEW: stronger guard than no_grad for inference
+    with torch.inference_mode():
         for i, t in enumerate(timesteps):
             # Prepare inputs for classifier-free guidance
             latent_input = torch.cat([latents] * 2) if guidance_scale > 1.0 else latents
@@ -112,12 +187,20 @@ def denoise_process_with_generator(visual_feats, text_feats, audio_len_in_s, mod
             syncformer_feat_input = syncformer_feat_input.to(dtype=compute_dtype)
             text_feat_input = text_feat_input.to(dtype=compute_dtype)
 
+            # call model (pass mask if you built cond_mask_rep outside the loop)
+            kwargs = dict(
+                x=latent_input, t=t_expand, cond=text_feat_input,
+                clip_feat=siglip2_feat_input, sync_feat=syncformer_feat_input,
+            )
+            if cond_mask_rep is not None:
+                kwargs["cond_mask"] = cond_mask_rep
+
             # Predict the noise residual
             if compute_dtype in (torch.float16, torch.bfloat16):
                 with torch.autocast(device_type=device.type, dtype=compute_dtype):
-                    noise_pred = model_dict.foley_model(x=latent_input, t=t_expand, cond=text_feat_input, clip_feat=siglip2_feat_input, sync_feat=syncformer_feat_input)["x"]
+                    noise_pred = model_dict.foley_model(**kwargs)["x"]
             else:
-                noise_pred = model_dict.foley_model(x=latent_input, t=t_expand, cond=text_feat_input, clip_feat=siglip2_feat_input, sync_feat=syncformer_feat_input)["x"]
+                noise_pred = model_dict.foley_model(**kwargs)["x"]
 
             # Perform guidance
             if guidance_scale > 1.0:
@@ -163,9 +246,20 @@ def feature_process_from_tensors(frames_8fps, frames_25fps, prompt, neg_prompt, 
 
     # Process Text features for both positive and negative prompts
     prompts = [neg_prompt, prompt]
-    text_feat_res, _ = encode_text_feat(prompts, deps)
 
-    text_feats = {'text_feat': text_feat_res[1:], 'uncond_text_feat': text_feat_res[:1]}
+    enc = deps.clap_tokenizer(prompts, padding=False, truncation=False)
+    raw_len = max(len(ids) for ids in enc["input_ids"])
+    cap = _caps(deps, cfg)
+    T_FIXED = min(128 if raw_len > 77 else 77, cap)
+    logger.info(f"Using T_FIXED bucket: {T_FIXED} (prompt had {raw_len} tokens; cap {cap})")
+    hs, mask = encode_text_feat(prompts, deps, T_fixed=T_FIXED)
+    setattr(deps, "_text_len_fixed", T_FIXED)
+    text_feats = {
+        'text_feat':          hs[1:],      # [1,T,D]
+        'uncond_text_feat':   hs[:1],      # [1,T,D]
+        'text_mask':          mask[1:].pin_memory(),    # [1,T]
+        'uncond_text_mask':   mask[:1].pin_memory(),    # [1,T]
+    }
 
     # Free CPU preprocessing tensors proactively (they can be large)
     del processed_8fps, processed_25fps, processed_8fps_dev, processed_25fps_dev
@@ -488,8 +582,20 @@ class HunyuanFoleySampler:
 
             # Process text features normally
             prompts = [negative_prompt, prompt]
-            text_feat_res, _ = encode_text_feat(prompts, hunyuan_deps)
-            text_feats = {'text_feat': text_feat_res[1:], 'uncond_text_feat': text_feat_res[:1]}
+            
+            enc = hunyuan_deps.clap_tokenizer(prompts, padding=False, truncation=False)
+            raw_len = max(len(ids) for ids in enc["input_ids"])
+            cap = _caps(hunyuan_deps, hunyuan_cfg)
+            T_FIXED = min(128 if raw_len > 77 else 77, cap)
+            logger.info(f"Using T_FIXED bucket: {T_FIXED} (prompt had {raw_len} tokens; cap {cap})")
+            hs, mask = encode_text_feat(prompts, hunyuan_deps, T_fixed=T_FIXED)
+            setattr(hunyuan_deps, "_text_len_fixed", T_FIXED)
+            text_feats = {
+                'text_feat':          hs[1:],      # [1,T,D]
+                'uncond_text_feat':   hs[:1],      # [1,T,D]
+                'text_mask':          mask[1:].pin_memory(),    # [1,T]
+                'uncond_text_mask':   mask[:1].pin_memory(),    # [1,T]
+            }
 
         # Immediately offload extractor models and free cache (ping-pong step)
         for key in ['siglip2_model', 'syncformer_model', 'clap_model']:
@@ -518,10 +624,12 @@ class HunyuanFoleySampler:
             'syncformer_feat': visual_feats['syncformer_feat'].to(device, non_blocking=True),
         }
         text_feats_gpu = {
-            'text_feat': text_feats['text_feat'].to(device, non_blocking=True),
-            'uncond_text_feat': text_feats['uncond_text_feat'].to(device, non_blocking=True),
+            'text_feat':          text_feats['text_feat'].to(device, non_blocking=True),
+            'uncond_text_feat':   text_feats['uncond_text_feat'].to(device, non_blocking=True),
+            # keep masks on CPU; denoiser moves them and casts to bool
+            'text_mask':          text_feats.get('text_mask'),
+            'uncond_text_mask':   text_feats.get('uncond_text_mask'),
         }
-
         # Combine all necessary model components into one dictionary for the denoiser
         # Avoid mutating shared deps; shallow-copy into a fresh AttributeDict for this call
         model_dict_for_process = AttributeDict(dict(hunyuan_deps))

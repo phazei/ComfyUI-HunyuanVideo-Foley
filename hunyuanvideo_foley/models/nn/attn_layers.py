@@ -352,6 +352,28 @@ def attention(
     elif mode == 'torch':
         if attn_mask is not None and attn_mask.dtype != torch.bool:
             attn_mask = attn_mask.to(q.dtype)
+        
+        def _attn_mask_fix(m, q, k):
+            if m is None:
+                return None
+            Lq = q.shape[-2]          # sequence length for queries
+            Lk = k.shape[-2]          # sequence length for keys
+            # (A) already correct shape -> keep
+            if m.dim() >= 2 and m.shape[-2:] == (Lq, Lk):
+                return m
+            # (B) heads×heads (e.g., 12×12) -> disable; totally wrong domain
+            if m.shape[-2:] == (q.shape[-3], k.shape[-3]):  # (H, H)
+                return None
+            # (C) oversized square (concat mask) -> crop bottom-right to (Lq, Lk)
+            if m.shape[-2] >= Lq and m.shape[-1] >= Lk:
+                return m[..., -Lq:, -Lk:]
+            # (D) anything else -> drop mask to avoid shape explosions
+            return None
+
+        # MODIFIED UPSTREAM
+        attn_mask = _attn_mask_fix(attn_mask, q, k)
+        # END MODIFIED UPSTREAM
+
         x = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=drop_rate, is_causal=causal)
 
     elif mode == "vanilla":
