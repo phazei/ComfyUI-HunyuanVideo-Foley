@@ -1,8 +1,10 @@
 import sys
 import os
+import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from inspect import cleandoc
 from loguru import logger
 from torchvision.transforms import v2
 from transformers import AutoTokenizer, AutoModel, ClapTextModelWithProjection
@@ -558,6 +560,113 @@ class HunyuanFoleySampler:
         audio_output_batch = {"waveform": waveform_batch, "sample_rate": sample_rate}
 
         return (audio_output_first, audio_output_batch)
+    
+# -----------------------------------------------------------------------------------
+# NODE: Hunyuan Foley Torch Compile (optional accelerator)
+# -----------------------------------------------------------------------------------
+class HunyuanFoleyTorchCompile:
+    """Torch Compile.
+    
+    If you change anything like duration, or batch, it'll compile again and takes about 2 minutes on a 3090.
+    Saves about 30% of the time.
+    """
+    DESCRIPTION = cleandoc(__doc__ or "")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "hunyuan_model": ("HUNYUAN_MODEL",),
+                "backend": (["inductor"], {"default": "inductor"}),
+                "fullgraph": ("BOOLEAN", {"default": False, "tooltip": "Capture entire graph (stricter); usually keep off"}),
+                "mode": (["default", "reduce-overhead", "max-autotune"], {"default": "default"}),
+                "dynamic": ("BOOLEAN", {"default": False, "tooltip": "Allow shape dynamism; safer when duration/batch vary"}),
+                "dynamo_cache_limit": ("INT", {"default": 64, "min": 64, "max": 8192, "step": 64,
+                                               "tooltip": "TorchDynamo graph cache size to limit graph explosion"}),
+            }
+        }
+
+    RETURN_TYPES = ("HUNYUAN_MODEL",)
+    FUNCTION = "compile_model"
+    CATEGORY = "audio/HunyuanFoley"
+
+    def compile_model(self, hunyuan_model, backend, mode, dynamic, fullgraph, dynamo_cache_limit):
+        # Configure cache size (optional but handy for many prompt/shape variants)
+        try:
+            torch._dynamo.config.cache_size_limit = int(dynamo_cache_limit)
+        except Exception:
+            pass
+
+        # PyTorch 2.0+ required
+        if not hasattr(torch, "compile"):
+            raise RuntimeError("torch.compile is not available in this PyTorch build.")
+        
+        # A failed attempt to simplify getting torch.compile dynamic compiled on windows without MSVC++
+        # try:
+        #     from torch._inductor import config as inductor_config
+        #     if hasattr(inductor_config, "cpp") and hasattr(inductor_config.cpp, "openmp"):
+        #         inductor_config.cpp.openmp = False
+        #         if hasattr(inductor_config.cpp, "wrapper"):
+        #             inductor_config.cpp.wrapper = False
+        # except Exception:
+        #     pass
+
+        # Important: do NOT touch dtype or device here; respect whatever the loader set up.
+        compiled = torch.compile(
+            hunyuan_model,
+            backend=backend,
+            mode=mode,
+            dynamic=dynamic,
+            fullgraph=fullgraph,
+        )
+
+        # --- Signature-aware forward logger (works because __call__ -> forward) ---
+        orig_forward = compiled.forward
+        seen = set()
+
+        def _sig_of(o):
+            if torch.is_tensor(o):
+                dev = (o.device.type, o.device.index if o.device.index is not None else 0)
+                return ("T", tuple(o.shape), str(o.dtype), dev)
+            if isinstance(o, (list, tuple)):
+                return tuple(_sig_of(x) for x in o)
+            if isinstance(o, dict):
+                return tuple(sorted((k, _sig_of(v)) for k, v in o.items()))
+            return (type(o).__name__,)
+
+        def _sig(args, kwargs):
+            return (_sig_of(args), _sig_of(kwargs))
+
+        def _logged_forward(*args, **kwargs):
+            s = _sig(args, kwargs)
+            is_new = s not in seen
+            t0 = None
+            if is_new:
+                logger.info("torch.compile: new input signature — compiling (can take a while)…")
+                t0 = time.perf_counter()
+            out = orig_forward(*args, **kwargs)
+            if is_new:
+                dt = time.perf_counter() - t0
+                logger.info(f"torch.compile: compile finished in {dt:.1f}s for that signature.")
+                seen.add(s)
+            return out
+
+        compiled.forward = _logged_forward
+
+        # Preserve convenient attributes that downstream nodes might read.
+        # Sampler currently reads `.dtype`; keep it stable.
+        if not hasattr(compiled, "dtype"):
+            try:
+                compiled.dtype = next(hunyuan_model.parameters()).dtype
+            except StopIteration:
+                pass
+
+        # Optional debug marker
+        compiled.__dict__["_compiled_with"] = {
+            "backend": backend, "mode": mode, "dynamic": dynamic, "fullgraph": fullgraph
+        }
+
+        return (compiled,)
 
 # -----------------------------------------------------------------------------------
 # HELPER NODE: Select Audio From Batch
@@ -598,11 +707,13 @@ NODE_CLASS_MAPPINGS = {
     "HunyuanModelLoader": HunyuanModelLoader,
     "HunyuanDependenciesLoader": HunyuanDependenciesLoader,
     "HunyuanFoleySampler": HunyuanFoleySampler,
+    "HunyuanFoleyTorchCompile": HunyuanFoleyTorchCompile,
     "SelectAudioFromBatch": SelectAudioFromBatch,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "HunyuanModelLoader": "Hunyuan-Foley Model Loader",
     "HunyuanDependenciesLoader": "Hunyuan-Foley Dependencies Loader",
     "HunyuanFoleySampler": "Hunyuan-Foley Sampler",
+    "HunyuanFoleyTorchCompile": "Hunyuan-Foley Torch Compile",
     "SelectAudioFromBatch": "Select Audio From Batch",
 }
