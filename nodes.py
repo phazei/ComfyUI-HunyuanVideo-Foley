@@ -2,6 +2,7 @@ import sys
 import os
 import time
 import torch
+import importlib
 import torch.nn as nn
 import torch.nn.functional as F
 from inspect import cleandoc
@@ -59,6 +60,64 @@ def _pad_or_trim_time(x, T_fixed: int):
     if T_cur > T_fixed:
         return x[:, :T_fixed, :]
     return F.pad(x, (0, 0, 0, T_fixed - T_cur))
+
+def _apply_attention_backend_strict(model: torch.nn.Module, backend_label: str):
+    """
+    backend_label: 'SDPA' | 'FLASH' | 'SAGE'
+    Sets per-layer .attn_mode directly, even if outer blocks disallow non-torch in their .set_attn_mode().
+    """
+    resolved = backend_label.upper()
+    ok = skipped = forced = failed = 0
+
+    def pick_target_mode(mod):
+        if resolved == "SDPA":
+            return "torch"
+        if resolved == "SAGE":
+            return "sage"
+        # FLASH: choose per kind
+        name = mod.__class__.__name__.lower()
+        if "cross" in name:
+            return "cross_flash"
+        if "self" in name:
+            return "self_flash"
+        # heuristic: if the module exposes is_cross_attention flag
+        if getattr(mod, "is_cross_attention", False):
+            return "cross_flash"
+        return "self_flash"
+
+    for m in model.modules():
+        # 1) if module has explicit setter, try it first
+        if hasattr(m, "set_attn_mode"):
+            try:
+                m.set_attn_mode(pick_target_mode(m))
+                ok += 1
+                continue
+            except NotImplementedError:
+                skipped += 1
+            except Exception:
+                failed += 1
+                continue
+
+        # 2) if it exposes an 'attn_mode' attribute, force it
+        if hasattr(m, "attn_mode"):
+            try:
+                setattr(m, "attn_mode", pick_target_mode(m))
+                forced += 1
+            except Exception:
+                failed += 1
+
+        # 3) common nesting: modules named like *.self_attn or *.cross_attn
+        for child_name in ("self_attn", "cross_attn", "attn", "attention"):
+            if hasattr(m, child_name):
+                sub = getattr(m, child_name)
+                if hasattr(sub, "attn_mode"):
+                    try:
+                        setattr(sub, "attn_mode", pick_target_mode(sub))
+                        forced += 1
+                    except Exception:
+                        failed += 1
+
+    logger.info(f"Attn backend '{resolved}': ok={ok}, forced={forced}, skipped(locked)={skipped}, failed={failed}")
 
 def prepare_latents_with_generator(scheduler, batch_size, num_channels_latents, length, dtype, device, generator=None):
     """Creates the initial random noise tensor using a specified torch.Generator for reproducibility."""
@@ -341,6 +400,8 @@ class HunyuanModelLoader:
                 "model_name": (folder_paths.get_filename_list("foley"),),
                 "precision": (["auto", "bf16", "fp16", "fp32"], {"default": "bf16", "tooltip": "Compute dtype for non-quantized params and autocast (auto = detect from checkpoint)"}),
                 "quantization": (["none", "fp8_e4m3fn", "fp8_e5m2", "auto"], {"default": "none", "tooltip": "FP8 weight-only storage for Linear layers, saves a few GB VRAM (compute still fp16/bf16)"}),
+                "attention_backend": (["SDPA", "Flash", "Sage"],
+                                    {"default": "SDPA", "tooltip": "Attention kernel for Hunyuan blocks"})
             }
         }
 
@@ -348,7 +409,8 @@ class HunyuanModelLoader:
     FUNCTION = "load_model"
     CATEGORY = "audio/HunyuanFoley"
 
-    def load_model(self, model_name, precision, quantization):
+    def load_model(self, model_name, precision, quantization, attention_backend="SDPA"):
+
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
         # dtype resolved after checkpoint is loaded if precision == 'auto'
@@ -393,6 +455,44 @@ class HunyuanModelLoader:
             gb = saved / (1024**3)
             logger.info(f"Applied {qmode} weight-only quantization to {count} Linear layers; ~{gb:.2f} GB saved on weights.")
             # IMPORTANT: Avoid calling model.to(dtype=...) after this point; it would upcast FP8-stored weights and lose savings.
+
+        # --- Attention backend selection (SDPA | Flash | Sage) ---
+        def _has(mod_name: str) -> bool:
+            try:
+                importlib.import_module(mod_name)
+                return True
+            except Exception:
+                return False
+
+        requested = (attention_backend or "SDPA").upper()
+        resolved = requested
+        if requested == "FLASH" and not (_has("flash_attn") or _has("flash_attn_2") or _has("flash_attn.flash_attn_interface")):
+            logger.warning("FlashAttention not found; falling back to SDPA.")
+            resolved = "SDPA"
+        elif requested == "SAGE" and not _has("sageattention"):
+            logger.warning("SageAttention not found; falling back to SDPA.")
+            resolved = "SDPA"
+        elif requested not in {"SDPA", "FLASH", "SAGE"}:
+            logger.warning(f"Unknown attention backend '{requested}'; using SDPA.")
+            resolved = "SDPA"
+
+        # try normal setters (for any layers that support them), then force on inner layers
+        # (this covers the case where outer Hunyuan blocks hard-lock .set_attn_mode('torch'))
+        try:
+            for m in foley_model.modules():
+                if hasattr(m, "set_attn_mode"):
+                    try:
+                        # pass a neutral value; inner walk below will specialize self/cross for FLASH
+                        m.set_attn_mode("torch" if resolved == "SDPA" else ("sage" if resolved == "SAGE" else "self_flash"))
+                    except NotImplementedError:
+                        pass
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        _apply_attention_backend_strict(foley_model, resolved)
+        logger.info(f"Attention backend requested: '{requested}' -> using: '{resolved}'.")
 
         logger.info(f"Loaded HunyuanVideoFoley main model: {model_name}")
         return (foley_model,)

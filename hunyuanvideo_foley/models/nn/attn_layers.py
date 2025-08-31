@@ -15,6 +15,12 @@ except Exception:
     _disable_compile = _dynamo.disable
 
 try:
+    from sageattention import sageattn, sageattn_varlen
+except Exception:
+    sageattn = None
+    sageattn_varlen = None
+
+try:
     from flash_attn import (
         flash_attn_qkvpacked_func,
         flash_attn_kvpacked_func,
@@ -49,6 +55,60 @@ def _flash_log(tag: str, **tensors):
     print("\n".join(lines))
 
 
+@_disable_compile()
+def _sage_call(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, *, causal: bool) -> torch.Tensor:
+    """
+    Safe call into sageattention.sageattn, excluded from torch.compile.
+    Expects q,k,v in HND layout: [B, H, N, D]
+    Coerces to fp16/bf16 for the kernel and restores original dtype on return.
+    """
+    assert sageattn is not None, "SageAttention not installed"
+
+    orig_dtype = q.dtype
+    # Kernel requires fp16/bf16 and consistent dtypes
+    if orig_dtype not in (torch.float16, torch.bfloat16) or (q.dtype != k.dtype or q.dtype != v.dtype):
+        # prefer sticking with the incoming half if it already is one, else choose fp16
+        target = q.dtype if q.dtype in (torch.float16, torch.bfloat16) else torch.float16
+        q = q.to(dtype=target, device=q.device, non_blocking=True)
+        k = k.to(dtype=target, device=q.device, non_blocking=True)
+        v = v.to(dtype=target, device=q.device, non_blocking=True)
+
+    out = sageattn(q, k, v, tensor_layout="HND", is_causal=causal)
+    # hand back the original dtype to keep surrounding math stable
+    if out.dtype != orig_dtype:
+        out = out.to(dtype=orig_dtype)
+    return out
+
+@_disable_compile()
+def _sage_varlen_call(
+    q_flat: torch.Tensor,             # [sum Nq, H, D]  (HND flattened on N)
+    kv_flat: torch.Tensor,            # [sum Nk, 2, H, D]
+    cu_q: torch.Tensor,               # int32 prefix sums, device=CUDA
+    cu_k: torch.Tensor,               # int32 prefix sums, device=CUDA
+    max_q: int,
+    max_k: int,
+    *, causal: bool, out_dtype: torch.dtype
+) -> torch.Tensor:
+    """
+    Safe call into sageattention varlen kernel; excluded from torch.compile.
+    Returns [sum Nq, H, D] (same layout as q_flat); caller reshapes.
+    """
+    assert sageattn_varlen is not None, "sageattn_varlen not available"
+
+    # Kernel requires fp16/bf16
+    if q_flat.dtype not in (torch.float16, torch.bfloat16):
+        q_flat  = q_flat.to(torch.float16)
+        kv_flat = kv_flat.to(torch.float16)
+
+    out = sageattn_varlen(
+        q_flat, kv_flat,
+        cu_seqlens_q=cu_q, cu_seqlens_k=cu_k,
+        max_seqlen_q=max_q, max_seqlen_k=max_k,
+        tensor_layout="HND", is_causal=causal
+    )
+    if out.dtype != out_dtype:
+        out = out.to(out_dtype)
+    return out
 
 
 def reshape_for_broadcast(freqs_cis: Union[torch.Tensor, Tuple[torch.Tensor]], x: torch.Tensor, head_first=False):
@@ -191,6 +251,10 @@ MEMORY_LAYOUT = {
     "torch": (
         lambda x: x.transpose(1, 2),
         lambda x: x.transpose(1, 2),
+    ),
+    "sage": (
+        lambda x: x.transpose(1, 2),
+        lambda x: x.transpose(1, 2)
     ),
     "vanilla": (
         lambda x: x.transpose(1, 2),
@@ -362,7 +426,7 @@ def attention(
     
     _flash_log(f"path={mode}")
 
-    if mode in ["torch", "vanilla", "self_flash", "cross_flash"]:
+    if mode in ["torch", "vanilla", "self_flash", "cross_flash", "sage"]:
         if isinstance(q, tuple):
             q = torch.cat(q, dim=1)
         if isinstance(k, tuple):
@@ -373,6 +437,17 @@ def attention(
         q = pre_attn_layout(q)
         k = pre_attn_layout(k)
         v = pre_attn_layout(v)
+
+
+    orig_dtype = q.dtype  # remember to cast back for the rest of the model
+    need_half = mode in {"self_flash", "cross_flash", "sage"}
+    if need_half and q.dtype not in (torch.float16, torch.bfloat16):
+        # Flash/Sage kernels require fp16/bf16 inputs
+        target = torch.float16  # or torch.bfloat16
+        q = q.to(target)
+        k = k.to(target)
+        v = v.to(target)
+
 
     if "flash" in mode:
         assert (
@@ -390,36 +465,101 @@ def attention(
         if mode == "self_flash" and q.shape[1] != k.shape[1]:
             mode = "cross_flash"
 
-        # ---------- SELF-ATTN: use VARLEN (uniform) + eager wrapper ----------
+        # ---------------- SELF-ATTN ----------------
         if mode == "self_flash":
-            qkv = torch.stack([q, k, v], dim=2)
             if attn_mask is not None:
                 raise ValueError("Self attention does not support attention mask")
+            # q,k,v same length -> qkvpacked
+            qkv = torch.stack([q, k, v], dim=2)            # [B, N, 3, A, H]
             x = flash_attn_qkvpacked_func(qkv, **flash_kwargs)
 
+        # ------------------------------------------------------------
+        # CROSS-ATTN: allow different q_len (audio/v-cond) vs kv_len (text)
+        # Use varlen kernel when lengths differ; otherwise use kv-packed.
+        # ------------------------------------------------------------
         elif mode == "cross_flash":
-            kv = torch.stack([k, v], dim=2)
-            if attn_mask is None:
-                x = flash_attn_kvpacked_func(q, kv, **flash_kwargs)
-            else:
-                b, s, a, h = q.shape
-                cu_seqlens_q, max_seqlen_q, q = get_q_seqlens(q)
-                cu_seqlens_k, max_seqlen_k, kv = get_kv_seqlens_with_mask(attn_mask, k, v)
+            B, Nq, A, H = q.shape
+            Nk = k.shape[1]
 
-                attn_output = flash_attn_varlen_kvpacked_func(
-                    q,
-                    kv,
-                    cu_seqlens_q=cu_seqlens_q,
-                    cu_seqlens_k=cu_seqlens_k,
-                    max_seqlen_q=max_seqlen_q,
-                    max_seqlen_k=max_seqlen_k,
-                    **flash_kwargs,
-                )
-                x = attn_output.reshape(b, s, a, h)
+            # Fast path: no mask & equal lengths -> kvpacked
+            if attn_mask is None and Nq == Nk:
+                kv = torch.stack([k, v], dim=2)            # [B, N, 2, A, H]
+                x = flash_attn_kvpacked_func(q, kv, **flash_kwargs)
+
+            else:
+                # varlen path (works whether mask is present or lengths differ)
+                if flash_attn_varlen_kvpacked_func is None:
+                    # Last-resort fallback for rare environments: SDPA for this op only
+                    # (keeps Flash on self-attn elsewhere)
+                    q_ = q.transpose(1, 2).reshape(B * A, Nq, H)   # [B*A, Nq, H]
+                    k_ = k.transpose(1, 2).reshape(B * A, Nk, H)
+                    v_ = v.transpose(1, 2).reshape(B * A, Nk, H)
+                    x_ = F.scaled_dot_product_attention(q_, k_, v_, attn_mask=None, is_causal=causal)
+                    x  = x_.reshape(B, A, Nq, H).transpose(1, 2)
+                else:
+                    # Build cu_seqlens for varlen (int32 on CUDA). If there is a real attn_mask,
+                    # reuse the existing helpers to compute seqlens; otherwise synthesize uniform seqlens.
+                    if attn_mask is not None:
+                        # Use your helpers for masked varlen
+                        b, s, a, h = q.shape
+                        cu_seqlens_q, max_seqlen_q, q_flat = get_q_seqlens(q)
+                        cu_seqlens_k, max_seqlen_k, kv_flat = get_kv_seqlens_with_mask(attn_mask, k, v)
+                        out = flash_attn_varlen_kvpacked_func(
+                            q_flat,
+                            kv_flat,
+                            cu_seqlens_q=cu_seqlens_q,
+                            cu_seqlens_k=cu_seqlens_k,
+                            max_seqlen_q=max_seqlen_q,
+                            max_seqlen_k=max_seqlen_k,
+                            **flash_kwargs,
+                        )
+                        x = out.reshape(b, s, a, h)
+                    else:
+                        # Uniform-varlen (no mask) when Nq != Nk
+                        q_flat  = q.reshape(B * Nq, A, H)          # [sum Nq, A, H]
+                        kv      = torch.stack([k, v], dim=2)       # [B, Nk, 2, A, H]
+                        kv_flat = kv.reshape(B * Nk, 2, A, H)      # [sum Nk, 2, A, H]
+                        cu_q = torch.arange(0, (B + 1) * Nq, step=Nq, dtype=torch.int32, device=q.device)
+                        cu_k = torch.arange(0, (B + 1) * Nk, step=Nk, dtype=torch.int32, device=q.device)
+                        out = flash_attn_varlen_kvpacked_func(
+                            q_flat,
+                            kv_flat,
+                            cu_seqlens_q=cu_q,
+                            cu_seqlens_k=cu_k,
+                            max_seqlen_q=Nq,
+                            max_seqlen_k=Nk,
+                            **flash_kwargs,
+                        )
+                        x = out.view(B, Nq, A, H)
+
     elif mode == 'torch':
         if attn_mask is not None and attn_mask.dtype != torch.bool:
             attn_mask = attn_mask.to(q.dtype)
         x = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=drop_rate, is_causal=causal)
+
+    elif mode == "sage":
+        # q,k,v are [B,H,N,D] here thanks to pre_attn_layout
+        if attn_mask is None:
+            x = _sage_call(q, k, v, causal=causal)
+
+        else:
+            # flip to [B,S,H,D] for varlen helpers
+            q_t = q.transpose(1, 2)   # [B,S,H,D]
+            k_t = k.transpose(1, 2)
+            v_t = v.transpose(1, 2)
+
+            # build varlen inputs from your existing helpers
+            cu_q, max_q, q_flat = get_q_seqlens(q_t)                      # q_flat: [sum Nq, H, D] (HND-flattened)
+            cu_k, max_k, kv_flat = get_kv_seqlens_with_mask(attn_mask, k_t, v_t)  # kv_flat: [sum Nk, 2, H, D]
+
+            out_unflat = _sage_varlen_call(
+                q_flat, kv_flat, cu_q, cu_k, max_q, max_k,
+                causal=causal, out_dtype=q.dtype
+            )
+            # back to [B,H,S,D] so post_attn_layout can restore [B,S,H,D]
+            b, s, a, d = q_t.shape
+            x = out_unflat.reshape(b, s, a, d).transpose(1, 2)
+
 
     elif mode == "vanilla":
         scale_factor = 1 / math.sqrt(q.size(-1))
@@ -449,7 +589,11 @@ def attention(
     else:
         raise NotImplementedError(f"Unsupported attention mode: {mode}")
 
-    if mode in ["torch", "vanilla", "self_flash", "cross_flash"]:
+
+    if need_half and x.dtype != orig_dtype:
+        x = x.to(orig_dtype)
+
+    if mode in ["torch", "vanilla", "self_flash", "cross_flash", "sage"]:
         x = post_attn_layout(x).contiguous()
     b, s, a, d = x.shape
     out = x.reshape(b, s, -1)
