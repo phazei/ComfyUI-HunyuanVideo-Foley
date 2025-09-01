@@ -137,11 +137,19 @@ def denoise_process_with_generator(visual_feats, text_feats, audio_len_in_s, mod
         pre_text_input = text_feat_rep
 
     pbar = comfy.utils.ProgressBar(len(timesteps))
-    with torch.inference_mode():  # NEW: stronger guard than no_grad for inference
+    with torch.inference_mode():
         for i, t in enumerate(timesteps):
             # Prepare inputs for classifier-free guidance
             latent_input = torch.cat([latents] * 2) if guidance_scale > 1.0 else latents
-            t_expand = t.repeat(latent_input.shape[0])
+
+            # ---- ensure timestep lives on the SAME device as latents (avoid CPU in graph) ----
+            if not torch.is_tensor(t):
+                t = torch.tensor(t, dtype=torch.long, device=latent_input.device)
+            else:
+                t = t.to(device=latent_input.device)
+            # expand to batch without materializing CPU intermediates
+            t_expand = t.expand(latent_input.shape[0]).contiguous()
+            # -----------------------------------------------------------------------------
 
             # Use precomputed conditional/unconditional features (no per-step rebuild)
             siglip2_feat_input = pre_siglip2_input
@@ -157,12 +165,17 @@ def denoise_process_with_generator(visual_feats, text_feats, audio_len_in_s, mod
 
             # Predict the noise residual
             if compute_dtype in (torch.float16, torch.bfloat16):
-                with torch.autocast(device_type=device.type, dtype=compute_dtype):
-                    noise_pred = model_dict.foley_model(x=latent_input, t=t_expand, cond=text_feat_input, clip_feat=siglip2_feat_input, sync_feat=syncformer_feat_input)["x"]
+                with torch.autocast(device_type=latent_input.device.type, dtype=compute_dtype):
+                    noise_pred = model_dict.foley_model(
+                        x=latent_input, t=t_expand, cond=text_feat_input,
+                        clip_feat=siglip2_feat_input, sync_feat=syncformer_feat_input
+                    )["x"]
             else:
-                noise_pred = model_dict.foley_model(x=latent_input, t=t_expand, cond=text_feat_input, clip_feat=siglip2_feat_input, sync_feat=syncformer_feat_input)["x"]
+                noise_pred = model_dict.foley_model(
+                    x=latent_input, t=t_expand, cond=text_feat_input,
+                    clip_feat=siglip2_feat_input, sync_feat=syncformer_feat_input
+                )["x"]
 
-            # Perform guidance
             if guidance_scale > 1.0:
                 noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                 noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
@@ -323,7 +336,13 @@ def _detect_ckpt_major_precision(state_dict):
 class HunyuanModelLoader:
     @classmethod
     def INPUT_TYPES(cls):
-        return {"required": {"model_name": (folder_paths.get_filename_list("foley"),), "precision": (["auto", "bf16", "fp16", "fp32"], {"default": "bf16", "tooltip": "Compute dtype for non-quantized params and autocast (auto = detect from checkpoint)"}), "quantization": (["none", "fp8_e4m3fn", "fp8_e5m2", "auto"], {"default": "none", "tooltip": "FP8 weight-only storage for Linear layers, saves a few GB VRAM (compute still fp16/bf16)"})}}
+        return {
+            "required": {
+                "model_name": (folder_paths.get_filename_list("foley"),),
+                "precision": (["auto", "bf16", "fp16", "fp32"], {"default": "bf16", "tooltip": "Compute dtype for non-quantized params and autocast (auto = detect from checkpoint)"}),
+                "quantization": (["none", "fp8_e4m3fn", "fp8_e5m2", "auto"], {"default": "none", "tooltip": "FP8 weight-only storage for Linear layers, saves a few GB VRAM (compute still fp16/bf16)"}),
+            }
+        }
 
     RETURN_TYPES = ("HUNYUAN_MODEL",)
     FUNCTION = "load_model"
@@ -440,8 +459,8 @@ class HunyuanFoleySampler:
             "required": {
                 "hunyuan_model": ("HUNYUAN_MODEL",),
                 "hunyuan_deps": ("HUNYUAN_DEPS",),
-                "frame_rate": ("INT", {"default": 16, "min": 1, "max": 120, "step": 1, "tooltip": "The framerate of the input image sequence"}),
-                "duration": ("FLOAT", {"default": 5.0, "min": 1, "max": 30.0, "step": 0.1, "tooltip": "Duration of the audio to generate in seconds"}),
+                "frame_rate": ("FLOAT", {"default": 16, "min": 1, "max": 120, "step": 0.1, "tooltip": "The framerate of the input image sequence"}),
+                "duration": ("FLOAT", {"default": 5.0, "min": 1, "max": 60.0, "step": 0.1, "tooltip": "Duration of the audio to generate in seconds"}),
                 "prompt": ("STRING", {"multiline": True, "default": "A person walks on frozen ice"}),
                 "negative_prompt": ("STRING", {"multiline": True, "default": "noisy, harsh"}),
                 "cfg_scale": ("FLOAT", {"default": 4.5, "min": 1.0, "max": 10.0, "step": 0.1, "tooltip": "Classifier-Free Guidance scale"}),
@@ -507,11 +526,13 @@ class HunyuanFoleySampler:
 
             # Resample to 8 FPS for SigLIP2 (content analysis)
             indices_8fps = torch.linspace(0, num_frames_to_process - 1, int(duration * 8)).long()
-            frames_8fps = image_slice[indices_8fps]
+            indices_8fps = indices_8fps.to(device=image_slice.device, non_blocking=True)
+            frames_8fps = image_slice.index_select(0, indices_8fps)
 
             # Resample to 25 FPS for Synchformer (sync analysis)
             indices_25fps = torch.linspace(0, num_frames_to_process - 1, int(duration * 25)).long()
-            frames_25fps = image_slice[indices_25fps]
+            indices_25fps = indices_25fps.to(device=image_slice.device, non_blocking=True)
+            frames_25fps = image_slice.index_select(0, indices_25fps)
 
             # Process features from the prepared frames
             visual_feats, text_feats, audio_len_in_s = feature_process_from_tensors(frames_8fps, frames_25fps, prompt, negative_prompt, hunyuan_deps, hunyuan_cfg)
@@ -609,6 +630,38 @@ class HunyuanFoleySampler:
 # -----------------------------------------------------------------------------------
 # NODE: Hunyuan Foley Torch Compile (optional accelerator)
 # -----------------------------------------------------------------------------------
+
+# --- HY-FOLEY: during Inductor compile, default tensor factories -> CUDA if unspecified ---
+class _CudaFactoriesDuringCompile:
+    """
+    Scope-limited patch: while active, torch factory calls with no explicit device
+    will default to CUDA (if available). This targets Inductor's tiny compile-time
+    scratch tensors so it never kicks the CPU codegen path on Windows.
+    """
+    _NAMES = ("empty", "zeros", "full", "arange", "linspace", "tensor")
+
+    def __enter__(self):
+        import torch
+        self.torch = torch
+        self.saved = {n: getattr(torch, n) for n in self._NAMES}
+
+        def _wrap(fn):
+            def inner(*args, **kwargs):
+                # Only add device if missing; no change if caller already set it.
+                if "device" not in kwargs and torch.cuda.is_available():
+                    kwargs["device"] = "cuda"
+                return fn(*args, **kwargs)
+            return inner
+
+        for n, fn in self.saved.items():
+            setattr(torch, n, _wrap(fn))
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        for n, fn in self.saved.items():
+            setattr(self.torch, n, fn)
+
+
 class HunyuanFoleyTorchCompile:
     """Torch Compile.
     
@@ -665,7 +718,7 @@ class HunyuanFoleyTorchCompile:
             fullgraph=fullgraph,
         )
 
-        # --- Signature-aware forward logger (works because __call__ -> forward) ---
+        # Signature-aware forward logger + wrap first-time compiles in CUDA-factory scope
         orig_forward = compiled.forward
         seen = set()
 
@@ -685,16 +738,18 @@ class HunyuanFoleyTorchCompile:
         def _logged_forward(*args, **kwargs):
             s = _sig(args, kwargs)
             is_new = s not in seen
-            t0 = None
             if is_new:
                 logger.info("torch.compile: new input signature — compiling (can take a while)…")
                 t0 = time.perf_counter()
-            out = orig_forward(*args, **kwargs)
-            if is_new:
+                # ONLY while Inductor compiles this new signature, force factory defaults to CUDA
+                with _CudaFactoriesDuringCompile():
+                    out = orig_forward(*args, **kwargs)
                 dt = time.perf_counter() - t0
                 logger.info(f"torch.compile: compile finished in {dt:.1f}s for that signature.")
                 seen.add(s)
-            return out
+                return out
+            # Reuse: no compile; just call
+            return orig_forward(*args, **kwargs)
 
         compiled.forward = _logged_forward
 
