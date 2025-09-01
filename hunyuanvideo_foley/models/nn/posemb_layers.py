@@ -24,7 +24,7 @@ def get_meshgrid_nd(start, *args, dim=2):
         dim (int): Dimension of the meshgrid. Defaults to 2.
 
     Returns:
-        grid (np.ndarray): [dim, ...]
+        grid (torch.Tensor): [dim, ...] on CUDA if available.
     """
     if len(args) == 0:
         # start is grid_size
@@ -35,7 +35,7 @@ def get_meshgrid_nd(start, *args, dim=2):
         # start is start, args[0] is stop, step is 1
         start = _to_tuple(start, dim=dim)
         stop = _to_tuple(args[0], dim=dim)
-        num = [stop[i] - start[i] for i in range(dim)]
+        num = [int(stop[i] - start[i]) for i in range(dim)]
     elif len(args) == 2:
         # start is start, args[0] is stop, args[1] is num
         start = _to_tuple(start, dim=dim)  # Left-Top       eg: 12,0
@@ -44,16 +44,21 @@ def get_meshgrid_nd(start, *args, dim=2):
     else:
         raise ValueError(f"len(args) should be 0, 1 or 2, but got {len(args)}")
 
+    dev = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+
     # PyTorch implement of np.linspace(start[i], stop[i], num[i], endpoint=False)
     axis_grid = []
     for i in range(dim):
-        a, b, n = start[i], stop[i], num[i]
-        g = torch.linspace(a, b, n + 1, dtype=torch.float32)[:n]
+        a, b, n = float(start[i]), float(stop[i]), int(num[i])
+        # torch-only, endpoint=False equivalent
+        g = torch.linspace(a, b, n + 1, device=dev, dtype=torch.float32)[:n]
         axis_grid.append(g)
+
     grid = torch.meshgrid(*axis_grid, indexing="ij")  # dim x [W, H, D]
     grid = torch.stack(grid, dim=0)  # [dim, W, H, D]
 
     return grid
+
 
 
 #################################################################################
@@ -139,15 +144,23 @@ def get_1d_rotary_pos_embed(
         freqs_cos, freqs_sin: Precomputed frequency tensor with real and imaginary parts separately. [S, D]
     """
     if isinstance(pos, int):
-        pos = torch.arange(pos).float()
+        pos = torch.arange(pos, device="cuda" if torch.cuda.is_available() else "cpu").float()
+    elif isinstance(pos, torch.Tensor) and pos.device.type == "cpu" and torch.cuda.is_available():
+        pos = pos.to("cuda")
+
+    # make theta and dim tensors to avoid aten.pow.Scalar and SymInt comparisons in post_grad
+    theta_t = torch.as_tensor(theta, device=pos.device, dtype=pos.dtype)
+    dim_t = torch.as_tensor(dim, device=pos.device, dtype=pos.dtype)
 
     # proposed by reddit user bloc97, to rescale rotary embeddings to longer sequence length without fine-tuning
     # has some connection to NTK literature
     # https://www.reddit.com/r/LocalLLaMA/comments/14lz7j5/ntkaware_scaled_rope_allows_llama_models_to_have/
     if theta_rescale_factor != 1.0:
-        theta *= theta_rescale_factor ** (dim / (dim - 1))
+        theta_t = theta_t * (theta_rescale_factor ** (float(int(dim)) / (float(int(dim)) - 1)))
 
-    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))  # [D/2]
+    idx = torch.arange(0, dim, 2, device=pos.device, dtype=pos.dtype)[: (dim // 2)]  # [D/2]
+    # Tensor-Tensor pow keeps Inductor happy (no Scalar pow); also avoids SymInt `.size()` path
+    freqs = torch.pow(theta_t.expand_as(idx), -(idx / dim_t))  # [D/2]
     freqs *= freq_scaling
     freqs = torch.outer(pos, freqs)  # [S, D/2]
     if use_real:
