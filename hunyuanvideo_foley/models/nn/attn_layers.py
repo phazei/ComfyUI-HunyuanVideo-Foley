@@ -55,6 +55,56 @@ def _flash_log(tag: str, **tensors):
     print("\n".join(lines))
 
 
+# --- HY-FOLEY Flash wrappers (run eager-only; never compiled) ---
+@_disable_compile()
+def _flash_self_varlen_eager(q, k, v, **flash_kwargs):
+    # Self-attn via varlen_qkvpacked (uniform seqlens) to mimic qkvpacked but avoid Inductor CPU wrapper.
+    _flash_log("FLASH(self): varlen_qkvpacked (eager)", q=q, k=k, v=v)
+    B, N, A, H = q.shape
+    qkv = torch.stack([q, k, v], dim=2).contiguous()        # [B, N, 3, A, H]
+    qkv_flat = qkv.view(B * N, 3, A, H).contiguous()        # [sum N, 3, A, H]
+    cu = torch.arange(0, (B + 1) * N, step=N, dtype=torch.int32, device=q.device)
+    out = flash_attn_varlen_qkvpacked_func(qkv_flat, cu, N, **flash_kwargs)  # [sum N, A, H]
+    return out.view(B, N, A, H)
+
+@_disable_compile()
+def _flash_cross_kv_eager(q, k, v, **flash_kwargs):
+    _flash_log("FLASH(cross): kvpacked (eager)", q=q, k=k, v=v)
+    kv = torch.stack([k, v], dim=2).contiguous()            # [B, Nk, 2, A, H]
+    return flash_attn_kvpacked_func(q, kv, **flash_kwargs)  # [B, Nq, A, H]
+
+@_disable_compile()
+def _flash_cross_varlen_masked_eager(q, k, v, attn_mask, **flash_kwargs):
+    _flash_log("FLASH(cross): varlen MASKED (eager)", q=q, k=k, v=v, attn_mask=attn_mask)
+    b, s, a, h = q.shape
+    cu_q, max_q, q_flat = get_q_seqlens(q)                                     # [b+1] int32 (CUDA), int, [sum Nq, A, H]
+    cu_k, max_k, kv_flat = get_kv_seqlens_with_mask(attn_mask, k, v)           # [b+1] int32 (CUDA), int, [sum Nk, 2, A, H]
+    out = flash_attn_varlen_kvpacked_func(
+        q_flat, kv_flat,
+        cu_seqlens_q=cu_q, cu_seqlens_k=cu_k,
+        max_seqlen_q=max_q, max_seqlen_k=max_k,
+        **flash_kwargs,
+    )
+    return out.reshape(b, s, a, h)
+
+@_disable_compile()
+def _flash_cross_varlen_uniform_eager(q, k, v, **flash_kwargs):
+    _flash_log("FLASH(cross): varlen UNMASKED (eager)", q=q, k=k, v=v)
+    B, Nq, A, H = q.shape
+    Nk = k.shape[1]
+    q_flat  = q.reshape(B * Nq, A, H).contiguous()
+    kv      = torch.stack([k, v], dim=2)                       # [B, Nk, 2, A, H]
+    kv_flat = kv.reshape(B * Nk, 2, A, H).contiguous()         # [sum Nk, 2, A, H]
+    cu_q = torch.arange(0, (B + 1) * Nq, step=Nq, dtype=torch.int32, device=q.device)
+    cu_k = torch.arange(0, (B + 1) * Nk, step=Nk, dtype=torch.int32, device=q.device)
+    out = flash_attn_varlen_kvpacked_func(
+        q_flat, kv_flat,
+        cu_seqlens_q=cu_q, cu_seqlens_k=cu_k,
+        max_seqlen_q=Nq, max_seqlen_k=Nk,
+        **flash_kwargs,
+    )
+    return out.view(B, Nq, A, H)
+
 @_disable_compile()
 def _sage_call(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, *, causal: bool) -> torch.Tensor:
     """
@@ -465,13 +515,11 @@ def attention(
         if mode == "self_flash" and q.shape[1] != k.shape[1]:
             mode = "cross_flash"
 
-        # ---------------- SELF-ATTN ----------------
+        # ---------- SELF-ATTN: use VARLEN (uniform) + eager wrapper ----------
         if mode == "self_flash":
             if attn_mask is not None:
                 raise ValueError("Self attention does not support attention mask")
-            # q,k,v same length -> qkvpacked
-            qkv = torch.stack([q, k, v], dim=2)            # [B, N, 3, A, H]
-            x = flash_attn_qkvpacked_func(qkv, **flash_kwargs)
+            x = _flash_self_varlen_eager(q, k, v, **flash_kwargs)   # [B, S, A, H]
 
         # ------------------------------------------------------------
         # CROSS-ATTN: allow different q_len (audio/v-cond) vs kv_len (text)
@@ -483,54 +531,16 @@ def attention(
 
             # Fast path: no mask & equal lengths -> kvpacked
             if attn_mask is None and Nq == Nk:
-                kv = torch.stack([k, v], dim=2)            # [B, N, 2, A, H]
-                x = flash_attn_kvpacked_func(q, kv, **flash_kwargs)
-
+                x = _flash_cross_kv_eager(q, k, v, **flash_kwargs)  # [B, S, A, H]
             else:
-                # varlen path (works whether mask is present or lengths differ)
-                if flash_attn_varlen_kvpacked_func is None:
-                    # Last-resort fallback for rare environments: SDPA for this op only
-                    # (keeps Flash on self-attn elsewhere)
-                    q_ = q.transpose(1, 2).reshape(B * A, Nq, H)   # [B*A, Nq, H]
-                    k_ = k.transpose(1, 2).reshape(B * A, Nk, H)
-                    v_ = v.transpose(1, 2).reshape(B * A, Nk, H)
-                    x_ = F.scaled_dot_product_attention(q_, k_, v_, attn_mask=None, is_causal=causal)
-                    x  = x_.reshape(B, A, Nq, H).transpose(1, 2)
-                else:
+                if attn_mask is not None:
                     # Build cu_seqlens for varlen (int32 on CUDA). If there is a real attn_mask,
                     # reuse the existing helpers to compute seqlens; otherwise synthesize uniform seqlens.
-                    if attn_mask is not None:
-                        # Use your helpers for masked varlen
-                        b, s, a, h = q.shape
-                        cu_seqlens_q, max_seqlen_q, q_flat = get_q_seqlens(q)
-                        cu_seqlens_k, max_seqlen_k, kv_flat = get_kv_seqlens_with_mask(attn_mask, k, v)
-                        out = flash_attn_varlen_kvpacked_func(
-                            q_flat,
-                            kv_flat,
-                            cu_seqlens_q=cu_seqlens_q,
-                            cu_seqlens_k=cu_seqlens_k,
-                            max_seqlen_q=max_seqlen_q,
-                            max_seqlen_k=max_seqlen_k,
-                            **flash_kwargs,
-                        )
-                        x = out.reshape(b, s, a, h)
-                    else:
-                        # Uniform-varlen (no mask) when Nq != Nk
-                        q_flat  = q.reshape(B * Nq, A, H)          # [sum Nq, A, H]
-                        kv      = torch.stack([k, v], dim=2)       # [B, Nk, 2, A, H]
-                        kv_flat = kv.reshape(B * Nk, 2, A, H)      # [sum Nk, 2, A, H]
-                        cu_q = torch.arange(0, (B + 1) * Nq, step=Nq, dtype=torch.int32, device=q.device)
-                        cu_k = torch.arange(0, (B + 1) * Nk, step=Nk, dtype=torch.int32, device=q.device)
-                        out = flash_attn_varlen_kvpacked_func(
-                            q_flat,
-                            kv_flat,
-                            cu_seqlens_q=cu_q,
-                            cu_seqlens_k=cu_k,
-                            max_seqlen_q=Nq,
-                            max_seqlen_k=Nk,
-                            **flash_kwargs,
-                        )
-                        x = out.view(B, Nq, A, H)
+                    x = _flash_cross_varlen_masked_eager(q, k, v, attn_mask, **flash_kwargs)
+                else:
+                    # Uniform-varlen (no mask) when Nq != Nk
+                    x = _flash_cross_varlen_uniform_eager(q, k, v, **flash_kwargs)
+
 
     elif mode == 'torch':
         if attn_mask is not None and attn_mask.dtype != torch.bool:
@@ -540,9 +550,11 @@ def attention(
     elif mode == "sage":
         # q,k,v are [B,H,N,D] here thanks to pre_attn_layout
         if attn_mask is None:
+            _flash_log("path=sage.dense", q=q, k=k, v=v)
             x = _sage_call(q, k, v, causal=causal)
 
         else:
+            _flash_log("path=sage.varlen.MASKED", q=q, k=k, v=v, attn_mask=attn_mask)
             # flip to [B,S,H,D] for varlen helpers
             q_t = q.transpose(1, 2)   # [B,S,H,D]
             k_t = k.transpose(1, 2)
