@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Union, Tuple
 from loguru import logger
 
 from .config_utils import AttributeDict
-from ..constants import FPS_VISUAL, MAX_VIDEO_DURATION_SECONDS
+from ..constants import FPS_VISUAL, MAX_VIDEO_DURATION_SECONDS, DEFAULT_NEGATIVE_PROMPT
 
 
 class FeatureExtractionError(Exception):
@@ -134,9 +134,10 @@ def encode_text_feat(text: List[str], model_dict):
     return outputs.last_hidden_state, outputs.attentions
 
 
-def feature_process(video_path, prompt, model_dict, cfg):
+def feature_process(video_path, prompt, model_dict, cfg, neg_prompt=None):
     visual_feats, audio_len_in_s = encode_video_features(video_path, model_dict)
-    neg_prompt = "noisy, harsh"
+    if neg_prompt is None:
+        neg_prompt = DEFAULT_NEGATIVE_PROMPT  # 使用常量中的默认值
     prompts = [neg_prompt, prompt]
     text_feat_res, text_feat_mask = encode_text_feat(prompts, model_dict)
 

@@ -16,12 +16,13 @@ def set_manual_seed(global_seed):
     np.random.seed(global_seed)
     torch.manual_seed(global_seed)
 
-def infer(video_path, prompt, model_dict, cfg, guidance_scale=4.5, num_inference_steps=50):
+def infer(video_path, prompt, model_dict, cfg, guidance_scale=4.5, num_inference_steps=50, neg_prompt=None):
     visual_feats, text_feats, audio_len_in_s = feature_process(
         video_path,
         prompt,
         model_dict,
-        cfg
+        cfg,
+        neg_prompt=neg_prompt
     )
 
     audio, sample_rate = denoise_process(
@@ -36,7 +37,7 @@ def infer(video_path, prompt, model_dict, cfg, guidance_scale=4.5, num_inference
     return audio[0], sample_rate
 
 
-def generate_audio(model_dict, cfg, csv_path, output_dir, guidance_scale=4.5, num_inference_steps=50):
+def generate_audio(model_dict, cfg, csv_path, output_dir, guidance_scale=4.5, num_inference_steps=50, neg_prompt=None):
 
     os.makedirs(output_dir, exist_ok=True)
     test_df = pd.read_csv(csv_path)
@@ -52,7 +53,7 @@ def generate_audio(model_dict, cfg, csv_path, output_dir, guidance_scale=4.5, nu
         output_video_path = os.path.join(output_dir, f"{index:04d}.mp4")
 
         if not os.path.exists(output_audio_path) or not os.path.exists(output_video_path):
-            audio, sample_rate = infer(video_path, prompt, model_dict, cfg, guidance_scale=guidance_scale, num_inference_steps=num_inference_steps)
+            audio, sample_rate = infer(video_path, prompt, model_dict, cfg, guidance_scale=guidance_scale, num_inference_steps=num_inference_steps, neg_prompt=neg_prompt)
             torchaudio.save(output_audio_path, audio, sample_rate)
 
             merge_audio_video(output_audio_path, video_path, output_video_path)
@@ -94,6 +95,12 @@ def parse_args():
         "--single_prompt", 
         type=str,
         help="Text prompt for single video (required when using --single_video)"
+    )
+    parser.add_argument(
+        "--neg_prompt", 
+        type=str,
+        default=None,
+        help="Negative prompt to avoid during generation (default: 'noisy, harsh')"
     )
     
     parser.add_argument(
@@ -207,7 +214,8 @@ def process_single_video(video_path, prompt, model_dict, cfg, output_dir, args):
     audio, sample_rate = infer(
         video_path, prompt, model_dict, cfg, 
         guidance_scale=args.guidance_scale,
-        num_inference_steps=args.num_inference_steps
+        num_inference_steps=args.num_inference_steps,
+        neg_prompt=args.neg_prompt
     )
     
     torchaudio.save(output_audio_path, audio, sample_rate)
@@ -258,7 +266,8 @@ def main():
             model_dict, cfg,
             args.csv_path, args.output_dir,
             guidance_scale=args.guidance_scale,
-            num_inference_steps=args.num_inference_steps
+            num_inference_steps=args.num_inference_steps,
+            neg_prompt=args.neg_prompt
         )
     
     logger.info("Processing completed!")

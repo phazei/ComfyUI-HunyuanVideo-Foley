@@ -73,6 +73,7 @@ def auto_load_models() -> str:
 def infer_single_video(
     video_file, 
     text_prompt: str, 
+    neg_prompt: str = None,
     guidance_scale: float = 4.5, 
     num_inference_steps: int = 50,
     sample_nums: int = 1
@@ -100,7 +101,8 @@ def infer_single_video(
             video_file,
             text_prompt,
             model_dict,
-            cfg
+            cfg,
+            neg_prompt=neg_prompt
         )
         
         # Denoising process to generate multiple audio samples
@@ -522,6 +524,13 @@ def create_gradio_interface():
                     info="Describe the audio you want to generate (optional)"
                 )
                 
+                neg_prompt_input = gr.Textbox(
+                    label="🚫 Negative Prompt",
+                    placeholder="noisy, harsh",
+                    lines=2,
+                    info="Describe what you want to avoid in the generated audio (optional, default: 'noisy, harsh')"
+                )
+                
                 with gr.Row():
                     guidance_scale = gr.Slider(
                         minimum=1.0,
@@ -703,10 +712,10 @@ def create_gradio_interface():
                                 example_buttons.append((example_btn, example))
         
         # Event handlers
-        def process_inference(video_file, text_prompt, guidance_scale, inference_steps, sample_nums):
+        def process_inference(video_file, text_prompt, neg_prompt, guidance_scale, inference_steps, sample_nums):
             # Generate videos
             video_list, status_msg = infer_single_video(
-                video_file, text_prompt, guidance_scale, inference_steps, int(sample_nums)
+                video_file, text_prompt, neg_prompt, guidance_scale, inference_steps, int(sample_nums)
             )
             # Update outputs with proper visibility
             return update_video_outputs(video_list, status_msg)
@@ -732,7 +741,7 @@ def create_gradio_interface():
         
         generate_btn.click(
             fn=process_inference,
-            inputs=[video_input, text_input, guidance_scale, inference_steps, sample_nums],
+            inputs=[video_input, text_input, neg_prompt_input, guidance_scale, inference_steps, sample_nums],
             outputs=[
                 video_output_1,  # Sample 1 value
                 video_output_2,  # Sample 2 value  
@@ -765,12 +774,12 @@ def create_gradio_interface():
                     if not result_video:
                         status_msg += f"\n⚠️ Result video not found: {ex['result_path']}"
                         
-                    return video_file, ex['caption'], result_video, status_msg
+                    return video_file, ex['caption'], "noisy, harsh", result_video, status_msg
                 return handler
             
             btn.click(
                 fn=create_example_handler(example),
-                outputs=[video_input, text_input, video_output_1, result_text]
+                outputs=[video_input, text_input, neg_prompt_input, video_output_1, result_text]
             )
         
         # Footer
