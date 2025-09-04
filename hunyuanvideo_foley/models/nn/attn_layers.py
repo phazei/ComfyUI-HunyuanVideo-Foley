@@ -6,6 +6,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
+
+try:
+    from torch import compiler as _compiler
+    _disable_compile = _compiler.disable
+except Exception:
+    import torch._dynamo as _dynamo
+    _disable_compile = _dynamo.disable
+
 try:
     from flash_attn import (
         flash_attn_qkvpacked_func,
@@ -13,14 +21,35 @@ try:
         flash_attn_varlen_kvpacked_func,
         flash_attn_varlen_qkvpacked_func,
     )
-    from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input
+    from flash_attn.bert_padding import pad_input, unpad_input
 except ImportError:
-    flash_attn_qkvpacked_func, flash_attn_kvpacked_func, flash_attn_varlen_kvpacked_func = None, None, None
-    index_first_axis = None
+    flash_attn_qkvpacked_func = flash_attn_kvpacked_func = flash_attn_varlen_kvpacked_func = None
+    index_first_axis = pad_input = unpad_input = None
 from packaging import version
 from transformers.utils.import_utils import _is_package_available
 
 from .norm_layers import get_norm_layer
+
+
+_DEBUG_FLASH = False
+
+@_disable_compile()  # ensure this never gets traced/compiled
+def _flash_log(tag: str, **tensors):
+    if not _DEBUG_FLASH:
+        return
+    lines = [f"[HY-FOLEY/ATTN] {tag}"]
+    for name, t in tensors.items():
+        if isinstance(t, torch.Tensor):
+            try:
+                lines.append(f"  {name}: dev={t.device}, dtype={t.dtype}, shape={tuple(t.shape)}")
+            except Exception:
+                lines.append(f"  {name}: <tensor>")
+        else:
+            lines.append(f"  {name}: {type(t).__name__}")
+    print("\n".join(lines))
+
+
+
 
 def reshape_for_broadcast(freqs_cis: Union[torch.Tensor, Tuple[torch.Tensor]], x: torch.Tensor, head_first=False):
     """
@@ -207,11 +236,41 @@ def is_flash_attn_greater_or_equal(library_version: str):
 
 
 def get_kv_seqlens_with_mask(attn_mask, k, v):
+    """
+    Build varlen KV from a padding mask without depending on FlashAttention.
+    Expects:
+      attn_mask: [B, S_k] boolean (True = keep)
+      k, v     : [B, S_k, A, H]
+    Returns:
+      cu_seqlens_k: [B+1] int32 (CUDA)
+      max_seqlen_k: int
+      kv_flat    : [sum S_k_valid, 2, A, H]
+    """
+    # --- move mask first, so _get_unpad_data runs on CUDA (no CPU subgraph) ---
+    if attn_mask.device != k.device:
+        _flash_log("moving attn_mask to CUDA for varlen mask ops",
+                   attn_mask=attn_mask, k=k)
+        attn_mask = attn_mask.to(device=k.device)
+
+    # indices, cu sums, max len — now fully on CUDA
     indices_k, cu_seqlens_k, max_seqlen_k = _get_unpad_data(attn_mask)
+
     b, s1, a, d = k.shape
-    k = index_first_axis(k.reshape(b * s1, a, d), indices_k)
-    v = index_first_axis(v.reshape(b * s1, a, d), indices_k)
-    kv = torch.stack([k, v], dim=1)
+
+    # ensure devices/dtypes expected by kernels
+    indices_k = indices_k.to(device=k.device, dtype=torch.long)
+    if cu_seqlens_k.device != k.device:
+        cu_seqlens_k = cu_seqlens_k.to(device=k.device)
+    if cu_seqlens_k.dtype != torch.int32:
+        cu_seqlens_k = cu_seqlens_k.to(dtype=torch.int32)
+
+    # gather valid rows
+    k = torch.index_select(k.reshape(b * s1, a, d), 0, indices_k)
+    v = torch.index_select(v.reshape(b * s1, a, d), 0, indices_k)
+    kv = torch.stack([k, v], dim=1)  # [sum S_k_valid, 2, A, H]
+
+    _flash_log("built KV varlen (masked)",
+               cu_seqlens_k=cu_seqlens_k, kv=kv)
     return cu_seqlens_k, max_seqlen_k, kv
 
 
@@ -300,6 +359,9 @@ def attention(
     Returns:
         torch.Tensor: Output tensor after self attention with shape [b, s, ad]
     """
+    
+    _flash_log(f"path={mode}")
+
     if mode in ["torch", "vanilla", "self_flash", "cross_flash"]:
         if isinstance(q, tuple):
             q = torch.cat(q, dim=1)
@@ -324,6 +386,11 @@ def attention(
                 )
             flash_kwargs["deterministic"] = deterministic
 
+        # If someone passed mismatched lengths under 'self', treat it as cross.
+        if mode == "self_flash" and q.shape[1] != k.shape[1]:
+            mode = "cross_flash"
+
+        # ---------- SELF-ATTN: use VARLEN (uniform) + eager wrapper ----------
         if mode == "self_flash":
             qkv = torch.stack([q, k, v], dim=2)
             if attn_mask is not None:
