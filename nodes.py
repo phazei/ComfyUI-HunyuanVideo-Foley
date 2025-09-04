@@ -356,7 +356,8 @@ class HunyuanModelLoader:
 
         model_path = folder_paths.get_full_path("foley", model_name)
         config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs", "hunyuanvideo-foley-xxl.yaml")
-        if not os.path.exists(config_path): raise FileNotFoundError(f"Hunyuan config file not found at {config_path}")
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"Hunyuan config file not found at {config_path}")
         cfg = load_yaml(config_path)
 
         # Load weights onto the offload device first to save VRAM
@@ -381,7 +382,7 @@ class HunyuanModelLoader:
         foley_model.to(dtype=dtype)
         foley_model.eval()
 
-        # NEW: Optional FP8 weight-only quantization for Linear layers (Ampere-safe)
+        # Optional FP8 weight-only quantization for Linear layers
         if quantization != "none":
             # Choose quantization mode (auto = honor fp8 tensors if present, else default to e4m3fn)
             if quantization == "auto":
