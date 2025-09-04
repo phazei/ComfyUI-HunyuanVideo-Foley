@@ -331,7 +331,7 @@ def _detect_ckpt_major_precision(state_dict):
     return max(counts, key=counts.get)
 
 # -----------------------------------------------------------------------------------
-# NODE 1: Hunyuan Model Loader
+# NODE 1: Hunyuan Model Loader (refactored: pure load + wrapper that compiles)
 # -----------------------------------------------------------------------------------
 class HunyuanModelLoader:
     @classmethod
@@ -341,11 +341,15 @@ class HunyuanModelLoader:
                 "model_name": (folder_paths.get_filename_list("foley"),),
                 "precision": (["auto", "bf16", "fp16", "fp32"], {"default": "bf16", "tooltip": "Compute dtype for non-quantized params and autocast (auto = detect from checkpoint)"}),
                 "quantization": (["none", "fp8_e4m3fn", "fp8_e5m2", "auto"], {"default": "none", "tooltip": "FP8 weight-only storage for Linear layers, saves a few GB VRAM (compute still fp16/bf16)"}),
+            },
+            "optional": {
+                # Optional input: configuration produced by the Torch Compile node.
+                "torch_compile_cfg": ("TORCH_COMPILE_CFG", {"tooltip": "If provided, compile the model using this configuration."}),
             }
         }
 
     RETURN_TYPES = ("HUNYUAN_MODEL",)
-    FUNCTION = "load_model"
+    FUNCTION = "build_model"
     CATEGORY = "audio/HunyuanFoley"
 
     def load_model(self, model_name, precision, quantization):
@@ -376,7 +380,7 @@ class HunyuanModelLoader:
         # Materialize the model on the target device with empty tensors
         foley_model.to_empty(device=device)
 
-        # Now, load the state dict into the properly materialized model
+        # Load the state dict into the properly materialized model
         foley_model.load_state_dict(state_dict, strict=False)
         # Ensure the runtime parameter dtype matches the requested precision
         foley_model.to(dtype=dtype)
@@ -395,6 +399,85 @@ class HunyuanModelLoader:
             # IMPORTANT: Avoid calling model.to(dtype=...) after this point; it would upcast FP8-stored weights and lose savings.
 
         logger.info(f"Loaded HunyuanVideoFoley main model: {model_name}")
+        return foley_model
+
+    def _apply_torch_compile(self, model: nn.Module, compile_cfg: dict):
+        try:
+            torch._dynamo.config.cache_size_limit = int(compile_cfg.get("dynamo_cache_limit", 64))
+        except Exception:
+            pass
+
+        if not hasattr(torch, "compile"):
+            raise RuntimeError("torch.compile is not available in this PyTorch build.")
+
+        backend   = compile_cfg.get("backend", "inductor")
+        mode      = compile_cfg.get("mode", "default")
+        dynamic   = compile_cfg.get("dynamic", False)  # may be True/False/None
+        fullgraph = compile_cfg.get("fullgraph", False)
+
+        compiled = torch.compile(
+            model,
+            backend=backend,
+            mode=mode,
+            dynamic=dynamic,
+            fullgraph=fullgraph,
+        )
+
+        # Signature-aware forward logger + wrap first-time compiles in CUDA-factory scope
+        orig_forward = compiled.forward
+        seen = set()
+
+        def _sig_of(o):
+            if torch.is_tensor(o):
+                dev = (o.device.type, o.device.index if o.device.index is not None else 0)
+                return ("T", tuple(o.shape), str(o.dtype), dev)
+            if isinstance(o, (list, tuple)):
+                return tuple(_sig_of(x) for x in o)
+            if isinstance(o, dict):
+                return tuple(sorted((k, _sig_of(v)) for k, v in o.items()))
+            return (type(o).__name__,)
+
+        def _sig(args, kwargs):
+            return (_sig_of(args), _sig_of(kwargs))
+
+        def _logged_forward(*args, **kwargs):
+            s = _sig(args, kwargs)
+            if s not in seen:
+                logger.info("torch.compile: new input signature — compiling (can take a while)…")
+                t0 = time.perf_counter()
+                with _CudaFactoriesDuringCompile():
+                    out = orig_forward(*args, **kwargs)
+                dt = time.perf_counter() - t0
+                logger.info(f"torch.compile: compile finished in {dt:.1f}s for that signature.")
+                seen.add(s)
+                return out
+            return orig_forward(*args, **kwargs)
+
+        compiled.forward = _logged_forward
+
+        if not hasattr(compiled, "dtype"):
+            try:
+                compiled.dtype = next(model.parameters()).dtype
+            except StopIteration:
+                pass
+
+        compiled.__dict__["_compiled_with"] = {
+            "backend": backend, "mode": mode, "dynamic": dynamic, "fullgraph": fullgraph
+        }
+        return compiled
+
+    # --- Public entry: call the pure loader, then (optionally) compile and return ---
+    def build_model(self, model_name, precision, quantization, torch_compile_cfg=None):
+        foley_model = self.load_model(model_name, precision, quantization)
+
+        # Compile only if the optional input is connected.
+        if torch_compile_cfg is not None:
+            try:
+                foley_model = self._apply_torch_compile(foley_model, torch_compile_cfg)
+                logger.info("HunyuanVideoFoley model compiled successfully via TorchCompile configuration.")
+            except Exception as e:
+                logger.error(f"TorchCompile failed; continuing with eager model. Error: {e}")
+
         return (foley_model,)
 
 # -----------------------------------------------------------------------------------
@@ -675,99 +758,33 @@ class HunyuanFoleyTorchCompile:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "hunyuan_model": ("HUNYUAN_MODEL",),
                 "backend": (["inductor"], {"default": "inductor"}),
                 "fullgraph": ("BOOLEAN", {"default": False, "tooltip": "Capture entire graph (stricter); usually keep off"}),
                 "mode": (["default", "reduce-overhead", "max-autotune"], {"default": "default"}),
-                "dynamic": ("BOOLEAN", {"default": False, "tooltip": "Allow shape dynamism; safer when duration/batch vary"}),
+                "dynamic": (["true", "false", "None"], {"default": "false", "tooltip": "Allow shape dynamism; safer when duration/batch vary"}),
                 "dynamo_cache_limit": ("INT", {"default": 64, "min": 64, "max": 8192, "step": 64,
                                                "tooltip": "TorchDynamo graph cache size to limit graph explosion"}),
             }
         }
 
-    RETURN_TYPES = ("HUNYUAN_MODEL",)
-    FUNCTION = "compile_model"
+    # Emits a config object to be consumed by the Model Loader
+    RETURN_TYPES = ("TORCH_COMPILE_CFG",)
+    FUNCTION = "make_config"
     CATEGORY = "audio/HunyuanFoley"
 
-    def compile_model(self, hunyuan_model, backend, mode, dynamic, fullgraph, dynamo_cache_limit):
-        # Configure cache size (optional but handy for many prompt/shape variants)
-        try:
-            torch._dynamo.config.cache_size_limit = int(dynamo_cache_limit)
-        except Exception:
-            pass
-
-        # PyTorch 2.0+ required
-        if not hasattr(torch, "compile"):
-            raise RuntimeError("torch.compile is not available in this PyTorch build.")
-        
-        # A failed attempt to simplify getting torch.compile dynamic compiled on windows without MSVC++
-        # try:
-        #     from torch._inductor import config as inductor_config
-        #     if hasattr(inductor_config, "cpp") and hasattr(inductor_config.cpp, "openmp"):
-        #         inductor_config.cpp.openmp = False
-        #         if hasattr(inductor_config.cpp, "wrapper"):
-        #             inductor_config.cpp.wrapper = False
-        # except Exception:
-        #     pass
-
-        # Important: do NOT touch dtype or device here; respect whatever the loader set up.
-        compiled = torch.compile(
-            hunyuan_model,
-            backend=backend,
-            mode=mode,
-            dynamic=dynamic,
-            fullgraph=fullgraph,
-        )
-
-        # Signature-aware forward logger + wrap first-time compiles in CUDA-factory scope
-        orig_forward = compiled.forward
-        seen = set()
-
-        def _sig_of(o):
-            if torch.is_tensor(o):
-                dev = (o.device.type, o.device.index if o.device.index is not None else 0)
-                return ("T", tuple(o.shape), str(o.dtype), dev)
-            if isinstance(o, (list, tuple)):
-                return tuple(_sig_of(x) for x in o)
-            if isinstance(o, dict):
-                return tuple(sorted((k, _sig_of(v)) for k, v in o.items()))
-            return (type(o).__name__,)
-
-        def _sig(args, kwargs):
-            return (_sig_of(args), _sig_of(kwargs))
-
-        def _logged_forward(*args, **kwargs):
-            s = _sig(args, kwargs)
-            is_new = s not in seen
-            if is_new:
-                logger.info("torch.compile: new input signature — compiling (can take a while)…")
-                t0 = time.perf_counter()
-                # ONLY while Inductor compiles this new signature, force factory defaults to CUDA
-                with _CudaFactoriesDuringCompile():
-                    out = orig_forward(*args, **kwargs)
-                dt = time.perf_counter() - t0
-                logger.info(f"torch.compile: compile finished in {dt:.1f}s for that signature.")
-                seen.add(s)
-                return out
-            # Reuse: no compile; just call
-            return orig_forward(*args, **kwargs)
-
-        compiled.forward = _logged_forward
-
-        # Preserve convenient attributes that downstream nodes might read.
-        # Sampler currently reads `.dtype`; keep it stable.
-        if not hasattr(compiled, "dtype"):
-            try:
-                compiled.dtype = next(hunyuan_model.parameters()).dtype
-            except StopIteration:
-                pass
-
-        # Optional debug marker
-        compiled.__dict__["_compiled_with"] = {
-            "backend": backend, "mode": mode, "dynamic": dynamic, "fullgraph": fullgraph
+    def make_config(self, backend, mode, dynamic, fullgraph, dynamo_cache_limit):
+        # Map tri-state string to Python value
+        dyn_map = {"true": True, "false": False, "None": None}
+        dynamic_val = dyn_map.get(str(dynamic), False)
+        cfg = {
+            "backend": backend,
+            "mode": mode,
+            "dynamic": dynamic_val,   # may be True/False/None
+            "fullgraph": fullgraph,
+            "dynamo_cache_limit": int(dynamo_cache_limit),
         }
-
-        return (compiled,)
+        # returning a plain dict is fine for custom types in Comfy
+        return (cfg,)
 
 # -----------------------------------------------------------------------------------
 # HELPER NODE: Select Audio From Batch
