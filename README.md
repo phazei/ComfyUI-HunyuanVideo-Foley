@@ -327,6 +327,9 @@ Process multiple videos using a CSV file with video paths and descriptions:
 </div>
 
 ```bash
+# Download sample test videos
+bash ./download_test_videos.sh
+
 python3 infer.py \
     --model_path PRETRAINED_MODEL_PATH_DIR \
     --config_path ./configs/hunyuanvideo-foley-xxl.yaml \
