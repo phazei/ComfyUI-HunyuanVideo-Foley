@@ -357,6 +357,9 @@ python3 gradio_app.py
 </div>
 
 ---
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=Tencent-Hunyuan/HunyuanVideo-Foley&type=Timeline)](https://www.star-history.com/#Tencent-Hunyuan/HunyuanVideo-Foley&Timeline)
 
 ## 📚 **Citation**
 
