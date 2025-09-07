@@ -1,6 +1,7 @@
 import sys
 import os
 import time
+import hashlib
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -44,6 +45,13 @@ except ImportError as e:
 # These are modified versions of the original library's functions to make them
 # compatible with ComfyUI's data flow (e.g., accepting a torch.Generator).
 # -----------------------------------------------------------------------------------
+
+def get_module_size_in_mb(module: nn.Module) -> float:
+    """Calculates the total size of a module's parameters in megabytes."""
+    total_bytes = 0
+    for param in module.parameters():
+        total_bytes += param.numel() * param.element_size()
+    return total_bytes / (1024 * 1024)
 
 def _caps(model_dict, cfg):
     tokmax = int(getattr(getattr(model_dict, "clap_tokenizer", None), "model_max_length", 10**9) or 10**9)
@@ -345,6 +353,8 @@ class HunyuanModelLoader:
             "optional": {
                 # Optional input: configuration produced by the Torch Compile node.
                 "torch_compile_cfg": ("TORCH_COMPILE_CFG", {"tooltip": "If provided, compile the model using this configuration."}),
+                # Optional input for BlockSwap settings.
+                "block_swap_args": ("BLOCKSWAPARGS", {"tooltip": "If provided, enables BlockSwap VRAM optimization during sampling."}),
             }
         }
 
@@ -396,12 +406,23 @@ class HunyuanModelLoader:
             count, saved = _quantize_linears_to_fp8_inplace(foley_model, qmode, min_features=0)
             gb = saved / (1024**3)
             logger.info(f"Applied {qmode} weight-only quantization to {count} Linear layers; ~{gb:.2f} GB saved on weights.")
-            # IMPORTANT: Avoid calling model.to(dtype=...) after this point; it would upcast FP8-stored weights and lose savings.
 
         logger.info(f"Loaded HunyuanVideoFoley main model: {model_name}")
         return foley_model
 
     def _apply_torch_compile(self, model: nn.Module, compile_cfg: dict):
+        """
+        Applies torch.compile to the computationally heavy blocks of the model
+        instead of the entire model. This improves compilation reliability and
+        enables dynamic operations like BlockSwap in the main forward pass.
+        
+        This method also wraps each compiled block's forward pass to provide
+        real-time progress feedback in the console during execution.
+        """
+        if hasattr(model, "_blocks_are_compiled") and model._blocks_are_compiled:
+            logger.info("Model blocks are already compiled. Skipping setup.")
+            return model
+
         try:
             torch._dynamo.config.cache_size_limit = int(compile_cfg.get("dynamo_cache_limit", 64))
         except Exception:
@@ -410,73 +431,138 @@ class HunyuanModelLoader:
         if not hasattr(torch, "compile"):
             raise RuntimeError("torch.compile is not available in this PyTorch build.")
 
+        # --- Signature Generation Helper Functions (defined inside to be captured by closure) ---
+        def _sig(args, kwargs, block_name=None):
+            def _meta(o):
+                if torch.is_tensor(o):
+                    dev = (o.device.type, o.device.index or 0)
+                    return (
+                        "T",
+                        tuple(o.shape),
+                        str(o.dtype),
+                        dev,
+                        tuple(o.stride()),
+                        bool(o.requires_grad),
+                        bool(o.is_contiguous()),
+                    )
+                if isinstance(o, (list, tuple)):
+                    return tuple(_meta(x) for x in o)
+                if isinstance(o, dict):
+                    # sort for determinism
+                    return tuple(sorted((k, _meta(v)) for k, v in o.items()))
+                return (type(o).__name__,)
+
+            meta = (block_name, _meta(args), _meta(kwargs))
+            blob = repr(meta).encode()
+            # 64-bit stable hash for set membership
+            return int.from_bytes(hashlib.blake2s(blob, digest_size=8).digest(), "little")
+
+        # --- JIT Compilation Progress Tracking Setup ---
+        model._compilation_progress_counter = [0]
+        model._total_blocks_to_compile = len(model.triple_blocks) + len(model.single_blocks)
+        model._seen_compile_signatures = set() # This will store the signatures of compiled functions.
+
+        def _create_logged_forward(original_forward_method, block_name, model_ref):
+            """
+            A wrapper function that intercepts every call to a block's forward method
+            to update a progress bar in the console for each denoising step.
+            """
+
+            def logged_forward(*args, **kwargs):
+                # Calculate the signature of the current inputs.
+                current_signature = _sig(args, kwargs, block_name)
+                # Check if this specific signature has been compiled before.
+                if current_signature not in model_ref._seen_compile_signatures:
+                    model_ref._seen_compile_signatures.add(current_signature) # Mark as seen at every end
+                    # It's a new signature, so a compilation will happen. Update the progress bar.
+                    
+                    counter_list = model_ref._compilation_progress_counter
+                    total_blocks = model_ref._total_blocks_to_compile
+
+                    # Only show the progress bar for the initial set of compilations.
+                    if counter_list[0] < total_blocks:
+                    # Increment the global counter every time a block is executed.
+                        counter_list[0] += 1
+
+                        # --- ASCII Progress Bar Logic ---
+                        # Calculate progress for the current denoising step.
+                        progress = counter_list[0] / total_blocks
+                        bar_length = 40
+                        filled_length = int(bar_length * progress)
+                        bar = '█' * filled_length + '─' * (bar_length - filled_length)
+                        print(f"\rHunyuanVideo-Foley: JIT Compiling {block_name}... [{bar}] {counter_list[0]}/{total_blocks} ({progress:.0%})", end="", flush=True)
+                        if counter_list[0] >= total_blocks:
+                            print("\n" + "HunyuanVideo-Foley: JIT Compilation finished.", flush=True)
+
+                with _CudaFactoriesDuringCompile():
+                    return original_forward_method(*args, **kwargs)
+
+            return logged_forward
+
+        # --- Main Compilation Logic ---
         backend   = compile_cfg.get("backend", "inductor")
         mode      = compile_cfg.get("mode", "default")
         dynamic   = compile_cfg.get("dynamic", False)  # may be True/False/None
         fullgraph = compile_cfg.get("fullgraph", False)
 
-        compiled = torch.compile(
-            model,
-            backend=backend,
-            mode=mode,
-            dynamic=dynamic,
-            fullgraph=fullgraph,
-        )
+        logger.info(f"torch.compile transformer blocks with backend='{backend}', mode='{mode}'...")
 
-        # Signature-aware forward logger + wrap first-time compiles in CUDA-factory scope
-        orig_forward = compiled.forward
-        seen = set()
+        # --- Compile and Wrap Triple-Stream Blocks ---
+        logger.info(f"{len(model.triple_blocks)} TwoStreamCABlocks...")
+        logger.info(f"{len(model.single_blocks)} SingleStreamBlocks...")
 
-        def _sig_of(o):
-            if torch.is_tensor(o):
-                dev = (o.device.type, o.device.index if o.device.index is not None else 0)
-                return ("T", tuple(o.shape), str(o.dtype), dev)
-            if isinstance(o, (list, tuple)):
-                return tuple(_sig_of(x) for x in o)
-            if isinstance(o, dict):
-                return tuple(sorted((k, _sig_of(v)) for k, v in o.items()))
-            return (type(o).__name__,)
-
-        def _sig(args, kwargs):
-            return (_sig_of(args), _sig_of(kwargs))
-
-        def _logged_forward(*args, **kwargs):
-            s = _sig(args, kwargs)
-            if s not in seen:
-                logger.info("torch.compile: new input signature — compiling (can take a while)…")
-                t0 = time.perf_counter()
-                with _CudaFactoriesDuringCompile():
-                    out = orig_forward(*args, **kwargs)
-                dt = time.perf_counter() - t0
-                logger.info(f"torch.compile: compile finished in {dt:.1f}s for that signature.")
-                seen.add(s)
-                return out
-            return orig_forward(*args, **kwargs)
-
-        compiled.forward = _logged_forward
-
-        if not hasattr(compiled, "dtype"):
+        # --- Compile and Wrap Triple-Stream Blocks ---
+        for i, block in enumerate(model.triple_blocks):
+            original_block = block._orig_mod if hasattr(block, "_orig_mod") else block
+            block_name = f"Triple-Stream Block {i+1}"
             try:
-                compiled.dtype = next(model.parameters()).dtype
-            except StopIteration:
-                pass
+                compiled_block = torch.compile(original_block, backend=backend, mode=mode, dynamic=dynamic, fullgraph=fullgraph)
+                compiled_block.forward = _create_logged_forward(compiled_block.forward, block_name, model)
+                model.triple_blocks[i] = compiled_block
+            except Exception as e:
+                logger.error(f"Failed to compile {block_name}. Continuing without compiling. Error: {e}")
 
-        compiled.__dict__["_compiled_with"] = {
-            "backend": backend, "mode": mode, "dynamic": dynamic, "fullgraph": fullgraph
-        }
-        return compiled
+        # --- Compile and Wrap Single-Stream Blocks ---
+        for i, block in enumerate(model.single_blocks):
+            original_block = block._orig_mod if hasattr(block, "_orig_mod") else block
+            block_name = f"Single-Stream Block {i+1}"
+            try:
+                compiled_block = torch.compile(original_block, backend=backend, mode=mode, dynamic=dynamic, fullgraph=fullgraph)
+                compiled_block.forward = _create_logged_forward(compiled_block.forward, block_name, model)
+                model.single_blocks[i] = compiled_block
+            except Exception as e:
+                logger.error(f"Failed to compile {block_name}. Continuing without compiling. Error: {e}")
+        
+        model._blocks_are_compiled = True
+        return model
 
-    # --- Public entry: call the pure loader, then (optionally) compile and return ---
-    def build_model(self, model_name, precision, quantization, torch_compile_cfg=None):
+    def build_model(self, model_name, precision, quantization, torch_compile_cfg=None, block_swap_args=None):
+        # NOTE: block_swap_args are received here but will be used in the sampler node.
+        # This is the first step in making the system aware of them.
         foley_model = self.load_model(model_name, precision, quantization)
+        
+        # total_model_size_mb = get_module_size_in_mb(foley_model)
+        # triple_blocks_size_mb = get_module_size_in_mb(foley_model.triple_blocks)
+        # single_blocks_size_mb = get_module_size_in_mb(foley_model.single_blocks)
+        # total_blocks_size_mb = triple_blocks_size_mb + single_blocks_size_mb
+        
+        # logger.info(f"--- Model Size Report ---")
+        # logger.info(f"Total Model Size: {total_model_size_mb:.2f} MB")
+        # logger.info(f"  - Triple-Stream Blocks (19x): {triple_blocks_size_mb:.2f} MB")
+        # logger.info(f"  - Single-Stream Blocks (38x): {single_blocks_size_mb:.2f} MB")
+        # logger.info(f"  - Total Swappable Block Size: {total_blocks_size_mb:.2f} MB")
+        # logger.info(f"  - Non-Block Parameters (Embedders, etc.): {total_model_size_mb - total_blocks_size_mb:.2f} MB")
+        # logger.info(f"-------------------------")
 
-        # Compile only if the optional input is connected.
+        # Add block_swap_args to the model object so the sampler can access it later.
+        foley_model.block_swap_args = block_swap_args
+
         if torch_compile_cfg is not None:
             try:
                 foley_model = self._apply_torch_compile(foley_model, torch_compile_cfg)
-                logger.info("HunyuanVideoFoley model compiled successfully via TorchCompile configuration.")
+                logger.info("HunyuanVideoFoley model blocks compiled successfully via TorchCompile configuration.")
             except Exception as e:
-                logger.error(f"TorchCompile failed; continuing with eager model. Error: {e}")
+                logger.error(f"TorchCompile setup failed; continuing with eager model. Error: {e}")
 
         return (foley_model,)
 
@@ -567,6 +653,10 @@ class HunyuanFoleySampler:
     def generate_audio(self, hunyuan_model, hunyuan_deps, frame_rate, duration, prompt, negative_prompt, cfg_scale, steps, sampler, batch_size, seed, force_offload, image=None):
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
+        
+        # Reset the compilation progress counter at the start of every run.
+        if hasattr(hunyuan_model, "_compilation_progress_counter"):
+            hunyuan_model._compilation_progress_counter[0] = 0
 
         config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs", "hunyuanvideo-foley-xxl.yaml")
         if not os.path.exists(config_path): raise FileNotFoundError(f"Hunyuan config file not found at {config_path}")
@@ -786,6 +876,30 @@ class HunyuanFoleyTorchCompile:
         # returning a plain dict is fine for custom types in Comfy
         return (cfg,)
 
+class HunyuanBlockSwap:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "blocks_to_swap": ("INT", {"default": 30, "min": 0, "max": 57, "step": 1, "tooltip": "Number of transformer blocks to offload to CPU. The model has 57 blocks in total (19 triple-stream + 38 single-stream)."}),
+            },
+            "optional": {
+                # These are added for future compatibility, mirroring WanVideo's options.
+                "use_non_blocking": ("BOOLEAN", {"default": False, "tooltip": "Use non-blocking memory transfer for offloading. Can be faster but reserves more RAM."}),
+                "prefetch_blocks": ("INT", {"default": 0, "min": 0, "max": 10, "step": 1, "tooltip": "Number of blocks to prefetch to GPU ahead of time. Hides data transfer latency."}),
+                "block_swap_debug": ("BOOLEAN", {"default": False, "tooltip": "Enable debug logging for block swapping performance."}),
+            },
+        }
+    RETURN_TYPES = ("BLOCKSWAPARGS",)
+    RETURN_NAMES = ("block_swap_args",)
+    FUNCTION = "set_args"
+    CATEGORY = "audio/HunyuanFoley"
+    DESCRIPTION = "Settings for block swapping to reduce VRAM by offloading transformer blocks to CPU."
+
+    def set_args(self, **kwargs):
+        # This node simply bundles its arguments into a dictionary.
+        return (kwargs,)
+
 # -----------------------------------------------------------------------------------
 # HELPER NODE: Select Audio From Batch
 # -----------------------------------------------------------------------------------
@@ -826,6 +940,7 @@ NODE_CLASS_MAPPINGS = {
     "HunyuanDependenciesLoader": HunyuanDependenciesLoader,
     "HunyuanFoleySampler": HunyuanFoleySampler,
     "HunyuanFoleyTorchCompile": HunyuanFoleyTorchCompile,
+    "HunyuanBlockSwap": HunyuanBlockSwap,
     "SelectAudioFromBatch": SelectAudioFromBatch,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -833,5 +948,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "HunyuanDependenciesLoader": "Hunyuan-Foley Dependencies Loader",
     "HunyuanFoleySampler": "Hunyuan-Foley Sampler",
     "HunyuanFoleyTorchCompile": "Hunyuan-Foley Torch Compile",
+    "HunyuanBlockSwap": "Hunyuan-Foley BlockSwap Settings",
     "SelectAudioFromBatch": "Select Audio From Batch",
 }
