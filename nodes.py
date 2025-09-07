@@ -241,75 +241,195 @@ def feature_process_from_tensors(frames_8fps, frames_25fps, prompt, neg_prompt, 
 # -----------------------------------------------------------------------------------
 # FP8 WEIGHT-ONLY QUANTIZATION HELPERS (storage in fp8, compute in fp16/bf16)
 # -----------------------------------------------------------------------------------
-class LinearFP8Wrapper(nn.Module):
-    """Wraps a Linear layer with FP8 weight *storage* and safe upcast at forward time.
-    - Weight is stored as float8 (e4m3fn/e5m2) to save VRAM.
-    - Forward upcasts weight (and bias) to the input dtype for matmul; compute stays in fp16/bf16.
-    This avoids unsupported Float8 promotion errors on Ampere while keeping memory wins.
-    """
-    def __init__(self, in_features:int, out_features:int, bias:torch.Tensor|None, quant_dtype:torch.dtype, device:torch.device):
-        super().__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        self.quant_dtype = quant_dtype
-        # Store weight as FP8 on the same device as the original module
-        self.weight = nn.Parameter(torch.empty((out_features, in_features), dtype=quant_dtype, device=device), requires_grad=False)
-        if bias is not None:
-            # Keep bias in higher precision (original dtype) for stability
-            self.bias = nn.Parameter(bias.detach().to(device=device), requires_grad=False)
-        else:
-            self.bias = None
+_DENY_SUBSTRINGS = (
+    ".bias",            # never quantize biases; they’re tiny and can be precision-sensitive
+    ".norm",            # covers LayerNorm/RMSNorm params (e.g., ".norm.weight")
+    "q_norm.",          # explicit Q-norms
+    "k_norm.",          # explicit K-norms
+    "final_layer.",     # keep model output projection high precision
+    "visual_proj.",     # keep early visual projection high precision
+                        # exclude cross-attn query/proj (both audio & v_cond)
+    "audio_cross_q.",
+    "v_cond_cross_q.",
+    "audio_cross_proj.",
+    "v_cond_cross_proj.",
+)
 
-    @classmethod
-    def from_linear(cls, lin:nn.Linear, quant_dtype:torch.dtype):
-        dev = lin.weight.device
-        mod = cls(lin.in_features, lin.out_features, lin.bias, quant_dtype, dev)
-        with torch.no_grad():
-            mod.weight.copy_(lin.weight.detach().to(dtype=quant_dtype))
-        return mod
+# FP8 storage dtypes we support (PyTorch exposes these two).
+_FP8_DTYPES = (torch.float8_e5m2, torch.float8_e4m3fn)
+
+
+class FP8WeightWrapper(nn.Module):
+    """
+    Minimal unified FP8 storage wrapper for Linear / Conv1d / Conv2d.
+
+    - Stores weights in FP8 (qdtype) as buffers (so they serialize with state_dict).
+    - On forward, upcasts weights (and bias if present) to the incoming tensor dtype
+      (fp16/bf16/float32) before calling the functional op, so compute stays high precision.
+    """
+    def __init__(self, mod: nn.Module, qdtype: torch.dtype):
+        super().__init__()
+        # Identify which op we’re wrapping; needed to pick the correct functional call.
+        self.kind = (
+            "linear" if isinstance(mod, nn.Linear)
+            else "conv1d" if isinstance(mod, nn.Conv1d)
+            else "conv2d"
+        )
+        self.qdtype = qdtype  # target FP8 storage dtype (e5m2 or e4m3fn)
+
+        # Convolution parameters are required to replay the exact conv op at inference.
+        if self.kind != "linear":
+            self.stride   = mod.stride
+            self.padding  = mod.padding
+            self.dilation = mod.dilation
+            self.groups   = mod.groups
+
+        # Allocate FP8 weight storage (on the same device), then copy from the original module.
+        # Using a buffer (not a Parameter) avoids FP8 params flowing through optimizers.
+        self.register_buffer(
+            "weight",
+            mod.weight.detach().to(device=mod.weight.device, dtype=qdtype),
+            persistent=True,
+        )
+
+        # Keep bias in higher precision (float32) to avoid tiny-scale loss; store as buffer too.
+        if mod.bias is None:
+            self.bias = None
+        else:
+            self.register_buffer(
+                "bias",
+                mod.bias.detach().to(device=mod.bias.device, dtype=torch.float32),
+                persistent=True,
+            )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Upcast weight to input dtype to ensure supported matmul kernels
+        # Upcast FP8 storage to the activation's compute dtype (fp16/bf16/fp32)
         w = self.weight.to(dtype=x.dtype)
-        b = self.bias
-        if b is not None and b.dtype != x.dtype:
-            b = b.to(dtype=x.dtype)
-        return F.linear(x, w, b)
+        b = None if self.bias is None else self.bias.to(dtype=x.dtype)
+
+        if self.kind == "linear":
+            return F.linear(x, w, b)
+
+        if self.kind == "conv1d":
+            # weight shape: [Cout, Cin_per_group, K], so expected Cin = Cin_per_group * groups
+            if x.ndim != 3:
+                raise RuntimeError(f"conv1d expects 3D input, got {tuple(x.shape)}")
+            expected_Cin = w.shape[1] * self.groups
+
+            # channels-first (N, C, L)
+            if x.shape[1] == expected_Cin:
+                return F.conv1d(x, w, b, self.stride, self.padding, self.dilation, self.groups)
+
+            # channels-last (N, L, C) → transpose to (N, C, L), conv, then transpose back
+            if x.shape[2] == expected_Cin:
+                x_t = x.transpose(1, 2)
+                y_t = F.conv1d(x_t, w, b, self.stride, self.padding, self.dilation, self.groups)
+                return y_t.transpose(1, 2)
+
+            raise RuntimeError(
+                f"conv1d channel mismatch: input {tuple(x.shape)}, expected Cin {expected_Cin}"
+            )
+
+        # self.kind == "conv2d"
+        # weight shape: [Cout, Cin_per_group, kH, kW] → expected Cin = Cin_per_group * groups
+        if x.ndim != 4:
+            raise RuntimeError(f"conv2d expects 4D input, got {tuple(x.shape)}")
+        expected_Cin = w.shape[1] * self.groups
+
+        # channels-first (N, C, H, W)
+        if x.shape[1] == expected_Cin:
+            return F.conv2d(x, w, b, self.stride, self.padding, self.dilation, self.groups)
+
+        # channels-last (N, H, W, C) → permute to (N, C, H, W), conv, permute back
+        if x.shape[3] == expected_Cin:
+            x_t = x.permute(0, 3, 1, 2)
+            y_t = F.conv2d(x_t, w, b, self.stride, self.padding, self.dilation, self.groups)
+            return y_t.permute(0, 2, 3, 1)
+
+        raise RuntimeError(
+            f"conv2d channel mismatch: input {tuple(x.shape)}, expected Cin {expected_Cin}"
+        )
 
 
-def _quantize_linears_to_fp8_inplace(module: nn.Module, quantization: str = "fp8_e4m3fn", min_features: int = 0):
-    """Recursively replace nn.Linear with LinearFP8Wrapper using the chosen FP8 storage dtype.
-    Only weight storage changes; compute remains in the runtime dtype by upcasting in forward.
+
+def _wrap_fp8_inplace(module: nn.Module, quantization: str = "fp8_e4m3fn", state_dict: dict | None = None):
     """
-    if quantization == "fp8_e5m2":
-        qdtype = torch.float8_e5m2
-    else:
-        # default to e4m3fn (balanced dynamic range/precision for activations/weights in practice)
-        qdtype = torch.float8_e4m3fn
+    Walk the module tree and replace Linear/Conv1d/Conv2d with FP8WeightWrapper.
 
-    count = 0
+    - Skips any submodule whose qualified name contains a deny substring.
+    - If the checkpoint (state_dict) already has FP8 for <name>.weight, those bytes are copied
+      verbatim into the wrapper (no re-encoding). Otherwise, the weight is downcast once to FP8.
+    - Compute remains in the activation dtype at runtime (the wrapper upcasts on forward).
+    - Returns (counts_per_type, saved_bytes).
+
+    Args:
+        module:      root nn.Module to transform in place.
+        quantization:"fp8_e5m2" or "fp8_e4m3fn" — the FP8 storage dtype to use when downcasting.
+        state_dict:  optional checkpoint tensors to source FP8 bytes from (for exact retention).
+
+    Example:
+        counts, saved = _wrap_fp8_inplace(foley_model, "fp8_e5m2", state_dict)
+    """
+    # Choose FP8 storage dtype based on the string; default path is e4m3fn.
+    qdtype = torch.float8_e5m2 if quantization == "fp8_e5m2" else torch.float8_e4m3fn
+
+    # Per-type replacement counters; useful for logging coverage.
+    counts = {"linear": 0, "conv1d": 0, "conv2d": 0}
+
+    # Total bytes saved (approx) = sum(original_bytes - fp8_bytes) for each replaced weight.
     saved_bytes = 0
 
-    def _replace(parent: nn.Module):
-        nonlocal count, saved_bytes
+    def _recurse(parent: nn.Module, prefix: str = ""):
+        nonlocal saved_bytes
+        # Iterate over immediate children so we can replace them in place.
         for name, child in list(parent.named_children()):
-            if isinstance(child, nn.Linear):
-                # Skip extremely small linears if desired
-                if max(child.in_features, child.out_features) < min_features:
-                    continue
-                # Estimate memory before/after (weights only)
-                orig = child.weight
-                before = orig.numel() * orig.element_size()  # bytes
-                wrapped = LinearFP8Wrapper.from_linear(child, qdtype)
-                setattr(parent, name, wrapped)
-                after = wrapped.weight.numel() * 1  # float8 is 1 byte/elt
-                count += 1
-                saved_bytes += max(0, before - after)
-            else:
-                _replace(child)
+            # Qualified name (e.g., "triple_blocks.2.audio_mlp.fc1")
+            full = f"{prefix}{name}" if prefix else name
 
-    _replace(module)
-    return count, saved_bytes
+            # Respect deny list: skip wrapping and keep descending into its children.
+            if any(tok in full for tok in _DENY_SUBSTRINGS):
+                _recurse(child, full)
+                continue
+
+            # Decide if this child is one of the supported types we wrap.
+            kind = (
+                "linear" if isinstance(child, nn.Linear)
+                else "conv1d" if isinstance(child, nn.Conv1d)
+                else "conv2d" if isinstance(child, nn.Conv2d)
+                else None
+            )
+
+            if kind is None:
+                # Not a target type; recurse to search deeper.
+                _recurse(child, full)
+                continue
+
+            # Compute original weight footprint in bytes for reporting.
+            before = child.weight.numel() * child.weight.element_size()
+
+            # Build a wrapper with FP8 storage, seeded from the current module.
+            wrapped = FP8WeightWrapper(child, qdtype)
+
+            # Fast path: if the checkpoint already had FP8 for this exact tensor name,
+            # copy those bytes (no re-quantization drift); cast only if FP8 variant differs.
+            if state_dict is not None:
+                w_src = state_dict.get(f"{full}.weight")
+                if isinstance(w_src, torch.Tensor) and w_src.dtype in _FP8_DTYPES:
+                    with torch.no_grad():
+                        wrapped.weight.copy_(w_src if w_src.dtype == qdtype else w_src.to(qdtype))
+
+            # Replace the child with our FP8 wrapper in the parent module.
+            setattr(parent, name, wrapped)
+
+            # Update counters and saved-bytes estimate (FP8 is 1 byte per element).
+            counts[kind] += 1
+            saved_bytes += max(0, before - wrapped.weight.numel() * 1)
+
+    # Kick off the in-place transformation from the provided root.
+    _recurse(module)
+
+    # Return how many modules we wrapped per type and the approximate memory saved.
+    return counts, saved_bytes
 
 # -----------------------------------------------------------------------------------
 # DTYPE / QUANT DETECTION HELPERS
@@ -395,12 +515,6 @@ class HunyuanModelLoader:
         # Load the state dict into the properly materialized model
         foley_model.load_state_dict(state_dict, strict=False)
 
-        # The state_dict is now copied into the model, so we no longer need the 10GB dictionary.
-        # Explicitly delete it and trigger garbage collection.
-        del state_dict
-        gc.collect() 
-        # mm.soft_empty_cache() # ComfyUI's recommended way to clear caches
-        
         # Ensure the runtime parameter dtype matches the requested precision
         foley_model.to(dtype=dtype)
         foley_model.eval()
@@ -418,11 +532,17 @@ class HunyuanModelLoader:
                     qmode = detected_fp8 if detected_fp8 is not None else "fp8_e4m3fn"
             else:
                 qmode = quantization
-            count, saved = _quantize_linears_to_fp8_inplace(foley_model, qmode, min_features=0)
-            gb = saved / (1024**3)
-            logger.info(f"Applied {qmode} weight-only quantization to {count} Linear layers; ~{gb:.2f} GB saved on weights.")
+
+            counts, saved = _wrap_fp8_inplace(foley_model, quantization=qmode, state_dict=state_dict)
+            logger.info(f"FP8 wrap -> linear:{counts['linear']} conv1d:{counts['conv1d']} conv2d:{counts['conv2d']} | saved ~{saved/(1024**3):.2f} GiB")
 
         logger.info(f"Loaded HunyuanVideoFoley main model: {model_name}")
+        
+        # The state_dict is now copied into the model, so we no longer need the 10GB dictionary.
+        # Explicitly delete it and trigger garbage collection.
+        del state_dict
+        gc.collect() 
+        
         return foley_model
 
     def _apply_torch_compile(self, model: nn.Module, compile_cfg: dict):
