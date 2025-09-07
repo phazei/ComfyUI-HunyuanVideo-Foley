@@ -2,6 +2,8 @@ import sys
 import os
 import time
 import hashlib
+import weakref
+import gc
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -348,7 +350,7 @@ class HunyuanModelLoader:
             "required": {
                 "model_name": (folder_paths.get_filename_list("foley"),),
                 "precision": (["auto", "bf16", "fp16", "fp32"], {"default": "bf16", "tooltip": "Compute dtype for non-quantized params and autocast (auto = detect from checkpoint)"}),
-                "quantization": (["none", "fp8_e4m3fn", "fp8_e5m2", "auto"], {"default": "none", "tooltip": "FP8 weight-only storage for Linear layers, saves a few GB VRAM (compute still fp16/bf16)"}),
+                "quantization": (["none", "fp8_e4m3fn", "fp8_e5m2", "auto"], {"default": "auto", "tooltip": "FP8 weight-only storage for Linear layers, saves a few GB VRAM (compute still fp16/bf16)"}),
             },
             "optional": {
                 # Optional input: configuration produced by the Torch Compile node.
@@ -392,6 +394,13 @@ class HunyuanModelLoader:
 
         # Load the state dict into the properly materialized model
         foley_model.load_state_dict(state_dict, strict=False)
+
+        # The state_dict is now copied into the model, so we no longer need the 10GB dictionary.
+        # Explicitly delete it and trigger garbage collection.
+        del state_dict
+        gc.collect() 
+        # mm.soft_empty_cache() # ComfyUI's recommended way to clear caches
+        
         # Ensure the runtime parameter dtype matches the requested precision
         foley_model.to(dtype=dtype)
         foley_model.eval()
@@ -400,7 +409,13 @@ class HunyuanModelLoader:
         if quantization != "none":
             # Choose quantization mode (auto = honor fp8 tensors if present, else default to e4m3fn)
             if quantization == "auto":
-                qmode = detected_fp8 if detected_fp8 is not None else "fp8_e4m3fn"
+                capability = (torch.cuda.get_device_capability()
+                            if torch.cuda.is_available() else (0, 0))
+                # Ampere/Lovelace (SM < 90): avoid e4m3 path
+                if capability[0] < 9:
+                    qmode = "fp8_e5m2"
+                else:
+                    qmode = detected_fp8 if detected_fp8 is not None else "fp8_e4m3fn"
             else:
                 qmode = quantization
             count, saved = _quantize_linears_to_fp8_inplace(foley_model, qmode, min_features=0)
@@ -418,6 +433,7 @@ class HunyuanModelLoader:
         
         This method also wraps each compiled block's forward pass to provide
         real-time progress feedback in the console during execution.
+        Uses a weak reference to prevent memory leaks from reference cycles.
         """
         if hasattr(model, "_blocks_are_compiled") and model._blocks_are_compiled:
             logger.info("Model blocks are already compiled. Skipping setup.")
@@ -462,13 +478,18 @@ class HunyuanModelLoader:
         model._total_blocks_to_compile = len(model.triple_blocks) + len(model.single_blocks)
         model._seen_compile_signatures = set() # This will store the signatures of compiled functions.
 
-        def _create_logged_forward(original_forward_method, block_name, model_ref):
+        def _create_logged_forward(original_forward_method, block_name, model_ref_weak): # Takes a weak reference now
             """
             A wrapper function that intercepts every call to a block's forward method
             to update a progress bar in the console for each denoising step.
             """
 
             def logged_forward(*args, **kwargs):
+                model_ref = model_ref_weak() # Dereference the weak reference
+                if model_ref is None:
+                    # The original model has been garbage collected, just run the original forward
+                    return original_forward_method(*args, **kwargs)
+
                 # Calculate the signature of the current inputs.
                 current_signature = _sig(args, kwargs, block_name)
                 # Check if this specific signature has been compiled before.
@@ -490,9 +511,9 @@ class HunyuanModelLoader:
                         bar_length = 40
                         filled_length = int(bar_length * progress)
                         bar = '█' * filled_length + '─' * (bar_length - filled_length)
-                        print(f"\rHunyuanVideo-Foley: JIT Compiling {block_name}... [{bar}] {counter_list[0]}/{total_blocks} ({progress:.0%})", end="", flush=True)
+                        print(f"\rJIT Compiling {block_name}... [{bar}] {counter_list[0]}/{total_blocks} ({progress:.0%})", end="", flush=True)
                         if counter_list[0] >= total_blocks:
-                            print("\n" + "HunyuanVideo-Foley: JIT Compilation finished.", flush=True)
+                            logger.info("\nJIT Compilation finished.")
 
                 with _CudaFactoriesDuringCompile():
                     return original_forward_method(*args, **kwargs)
@@ -511,13 +532,15 @@ class HunyuanModelLoader:
         logger.info(f"{len(model.triple_blocks)} TwoStreamCABlocks...")
         logger.info(f"{len(model.single_blocks)} SingleStreamBlocks...")
 
+        model_ref_weak = weakref.ref(model) # Prevent memory leak in closure
+        
         # --- Compile and Wrap Triple-Stream Blocks ---
         for i, block in enumerate(model.triple_blocks):
             original_block = block._orig_mod if hasattr(block, "_orig_mod") else block
             block_name = f"Triple-Stream Block {i+1}"
             try:
                 compiled_block = torch.compile(original_block, backend=backend, mode=mode, dynamic=dynamic, fullgraph=fullgraph)
-                compiled_block.forward = _create_logged_forward(compiled_block.forward, block_name, model)
+                compiled_block.forward = _create_logged_forward(compiled_block.forward, block_name, model_ref_weak)
                 model.triple_blocks[i] = compiled_block
             except Exception as e:
                 logger.error(f"Failed to compile {block_name}. Continuing without compiling. Error: {e}")
@@ -528,7 +551,7 @@ class HunyuanModelLoader:
             block_name = f"Single-Stream Block {i+1}"
             try:
                 compiled_block = torch.compile(original_block, backend=backend, mode=mode, dynamic=dynamic, fullgraph=fullgraph)
-                compiled_block.forward = _create_logged_forward(compiled_block.forward, block_name, model)
+                compiled_block.forward = _create_logged_forward(compiled_block.forward, block_name, model_ref_weak)
                 model.single_blocks[i] = compiled_block
             except Exception as e:
                 logger.error(f"Failed to compile {block_name}. Continuing without compiling. Error: {e}")
@@ -560,7 +583,7 @@ class HunyuanModelLoader:
         if torch_compile_cfg is not None:
             try:
                 foley_model = self._apply_torch_compile(foley_model, torch_compile_cfg)
-                logger.info("HunyuanVideoFoley model blocks compiled successfully via TorchCompile configuration.")
+                logger.info("HunyuanVideoFoley model blocks compile configuration successful via TorchCompile configuration.")
             except Exception as e:
                 logger.error(f"TorchCompile setup failed; continuing with eager model. Error: {e}")
 
@@ -669,7 +692,7 @@ class HunyuanFoleySampler:
 
         # \- PHASE 1 -------------------------------------------------------
         # Feature extraction on GPU with only extractor models resident
-        logger.info("Phase 1: Extracting features (ping-pong on)")
+        logger.info("Phase 1: Extracting features")
 
         # Move extractors to GPU in target dtype. Keep tokenizer on CPU.
         for key in ['siglip2_model', 'syncformer_model', 'clap_model']:
@@ -733,7 +756,6 @@ class HunyuanFoleySampler:
         for key in ['siglip2_model', 'syncformer_model', 'clap_model']:
             hunyuan_deps[key].to(offload_device)
         mm.soft_empty_cache()
-        logger.info("Phase 1 Complete. Extractors offloaded.")
 
         # Move features to CPU (pinned) to minimize residency between phases
         # Ensure features are in target dtype and pinned for fast H2D copy later
