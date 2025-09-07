@@ -387,8 +387,8 @@ class HunyuanModelLoader:
         with init_empty_weights():
             foley_model = HunyuanVideoFoley(cfg, dtype=dtype)
 
-        # Materialize the model on the target device with empty tensors
-        foley_model.to_empty(device=device)
+        # Materialize the model on the offload device (CPU) to avoid VRAM spikes in the loader
+        foley_model.to_empty(device=offload_device)
 
         # Load the state dict into the properly materialized model
         foley_model.load_state_dict(state_dict, strict=False)
@@ -747,8 +747,19 @@ class HunyuanFoleySampler:
         # Denoising with only the main model resident; delay DAC until decode
         logger.info("Phase 2: Denoising with main model")
 
-        # Move main model to GPU now
-        hunyuan_model.to(device)
+        # Check for and apply BlockSwap settings before sampling
+        if hasattr(hunyuan_model, 'block_swap_args') and hunyuan_model.block_swap_args is not None:
+            # The block_swap method will handle device placement itself.
+            args = hunyuan_model.block_swap_args
+            hunyuan_model.block_swap(
+                blocks_to_swap=args.get("blocks_to_swap", 0),
+                use_non_blocking=args.get("use_non_blocking", False),
+                prefetch_blocks=args.get("prefetch_blocks", 0),
+                block_swap_debug=args.get("block_swap_debug", False),
+            )
+        else:
+            # If not used, we must explicitly move the model to the main device.
+            hunyuan_model.to(device)
 
         # Just-in-time copy features to GPU
         visual_feats_gpu = {
@@ -815,7 +826,6 @@ class _CudaFactoriesDuringCompile:
     _NAMES = ("empty", "zeros", "full", "arange", "linspace", "tensor")
 
     def __enter__(self):
-        import torch
         self.torch = torch
         self.saved = {n: getattr(torch, n) for n in self._NAMES}
 
@@ -886,7 +896,7 @@ class HunyuanBlockSwap:
             "optional": {
                 # These are added for future compatibility, mirroring WanVideo's options.
                 "use_non_blocking": ("BOOLEAN", {"default": False, "tooltip": "Use non-blocking memory transfer for offloading. Can be faster but reserves more RAM."}),
-                "prefetch_blocks": ("INT", {"default": 0, "min": 0, "max": 10, "step": 1, "tooltip": "Number of blocks to prefetch to GPU ahead of time. Hides data transfer latency."}),
+                "prefetch_blocks": ("INT", {"default": 1, "min": 0, "max": 10, "step": 1, "tooltip": "Number of blocks to prefetch to GPU ahead of time. Hides data transfer latency."}),
                 "block_swap_debug": ("BOOLEAN", {"default": False, "tooltip": "Enable debug logging for block swapping performance."}),
             },
         }
