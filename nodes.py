@@ -41,25 +41,15 @@ except ImportError as e:
     raise
 
 # --- Import refactored local utilities (moved out of this file) ---
-try:
-    from .utils import (
-        denoise_process_with_generator,
-        feature_process_from_tensors,
-        _wrap_fp8_inplace,
-        _detect_ckpt_fp8,
-        _detect_ckpt_major_precision,
-        _CudaFactoriesDuringCompile,
-    )
-except Exception:
-    # Fallback for environments that don't treat this as a package
-    from utils import (  # type: ignore
-        denoise_process_with_generator,
-        feature_process_from_tensors,
-        _wrap_fp8_inplace,
-        _detect_ckpt_fp8,
-        _detect_ckpt_major_precision,
-        _CudaFactoriesDuringCompile,
-    )
+from .utils import (
+    denoise_process_with_generator,
+    feature_process_from_tensors,
+    _wrap_fp8_inplace,
+    _detect_ckpt_fp8,
+    _detect_ckpt_major_precision,
+    _CudaFactoriesDuringCompile,
+    load_dac_any
+)
 
 # -----------------------------------------------------------------------------------
 # NODE 1: Hunyuan Model Loader (refactored: pure load)
@@ -183,7 +173,7 @@ class HunyuanDependenciesLoader:
         deps = {}
 
         # Load local model files (VAE, Synchformer)
-        deps['dac_model'] = DAC.load(folder_paths.get_full_path("foley", vae_name)).to(offload_device).eval()
+        deps['dac_model'] = load_dac_any(folder_paths.get_full_path("foley", vae_name), device=offload_device)
         synchformer_sd = load_torch_file(folder_paths.get_full_path("foley", synchformer_name), device=offload_device)
         syncformer_model = Synchformer()
         syncformer_model.load_state_dict(synchformer_sd, strict=False)
