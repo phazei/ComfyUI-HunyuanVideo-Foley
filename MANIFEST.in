@@ -1,0 +1,38 @@
+# Include package metadata and documentation
+include README.md
+include LICENSE 
+include NOTICE
+include DEVELOPMENT.md
+include CLAUDE.md
+include requirements.txt
+include pyproject.toml
+include pytest.ini
+
+# Include configuration files
+include configs/*.yaml
+include configs/*.yml
+recursive-include hunyuanvideo_foley/configs *.yaml *.yml
+
+# Include test assets if any
+include assets/*.csv
+include assets/*.txt
+recursive-include assets/test_videos *
+
+# Include example scripts
+include *.py
+include *.sh
+
+# Include test files
+recursive-include tests *.py
+
+# Exclude unnecessary files
+global-exclude *.pyc
+global-exclude *.pyo
+global-exclude *~
+global-exclude .DS_Store
+global-exclude __pycache__
+prune .git
+prune .github
+prune examples/*/outputs
+prune **/__pycache__
+prune **/*.pyc
