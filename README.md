@@ -58,6 +58,26 @@
   
 </div>
 
+---
+
+## 🤝 **Community Contributions**
+
+<div style="background: #f8f9fa; padding: 20px; border-radius: 10px; border-left: 4px solid #28a745; margin: 20px 0; color: #333;">
+
+**ComfyUI Integration** - Thanks to the amazing community for creating ComfyUI nodes:
+
+- **[if-ai/ComfyUI_HunyuanVideoFoley](https://github.com/if-ai/ComfyUI_HunyuanVideoFoley)** - ComfyUI workflow integration which supports cpu offloading and FP8 quantization
+- **[phazei/ComfyUI-HunyuanVideo-Foley](https://github.com/phazei/ComfyUI-HunyuanVideo-Foley)** - Alternative ComfyUI node implementation which supports different precision modes
+
+</div>
+
+<div align="center" style="margin: 20px 0;">
+  
+**🌟 We encourage and appreciate community contributions that make HunyuanVideo-Foley more accessible!**
+
+</div>
+
+---
 ### ✨ **Key Highlights**
 
 <table align="center" style="border: none; margin: 20px 0;">
@@ -357,9 +377,6 @@ python3 gradio_app.py
 </div>
 
 ---
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=Tencent-Hunyuan/HunyuanVideo-Foley&type=Timeline)](https://www.star-history.com/#Tencent-Hunyuan/HunyuanVideo-Foley&Timeline)
 
 ## 📚 **Citation**
 
@@ -439,6 +456,7 @@ If you find **HunyuanVideo-Foley** useful for your research, please consider cit
 **🌟 Special thanks to all researchers and developers who contribute to the advancement of AI-generated audio and multimodal learning!**
 
 </div>
+
 
 ---
 
