@@ -1,14 +1,15 @@
 # utils.py
-
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from loguru import logger
 from diffusers.utils.torch_utils import randn_tensor
-import comfy.utils
+from comfy.utils import load_torch_file, ProgressBar
 
 # --- Optional imports from the original HunyuanVideo-Foley package ---
 try:
+    from hunyuanvideo_foley.models.dac_vae.model.dac import DAC
     from hunyuanvideo_foley.utils.schedulers import FlowMatchDiscreteScheduler
     from hunyuanvideo_foley.utils.feature_utils import (
         encode_video_with_siglip2,
@@ -17,14 +18,73 @@ try:
     )
 except Exception:
     # Defer ImportError until the calling site actually uses these helpers.
+    DAC = None
     pass
-
 
 # -----------------------------------------------------------------------------------
 # HELPER FUNCTIONS - ADAPTED FOR COMFYUI WORKFLOW
 # These are modified versions of the original library's functions to make them
 # compatible with ComfyUI's data flow (e.g., accepting a torch.Generator).
 # -----------------------------------------------------------------------------------
+
+# DAC kwargs + explicit latent_dim (must be 128 or the decoder mismatches)
+# extracted from original pth
+_DAC_KWARGS = dict(
+    encoder_dim=128,
+    encoder_rates=[2, 3, 4, 5, 8],
+    latent_dim=128,
+    decoder_dim=2048,
+    decoder_rates=[8, 5, 4, 3, 2],
+    n_codebooks=9,
+    codebook_size=1024,
+    codebook_dim=8,
+    quantizer_dropout=False,
+    sample_rate=48000,
+    continuous=True,
+)
+
+def _tdev(d):  # accept "cpu", "cuda:0", torch.device
+    return d if isinstance(d, torch.device) else torch.device(str(d))
+
+def _extract_state(obj):
+    # Accept: nn.Module, {"state_dict":..., "metadata":...}, or a flat dict of tensors
+    if isinstance(obj, nn.Module):
+        return obj.state_dict()
+    if isinstance(obj, dict):
+        if "state_dict" in obj and isinstance(obj["state_dict"], dict):
+            return obj["state_dict"]
+        # plain dict of tensors (e.g., safetensors via comfy)
+        # keep only tensor entries
+        return {k: v for k, v in obj.items() if isinstance(v, torch.Tensor)}
+    raise RuntimeError(f"Unsupported checkpoint payload: {type(obj)}")
+
+def load_dac_any(path: str, device="cpu", strict: bool = True):
+    """
+    Single loader for .pth and .safetensors using the KNOWN, FIXED kwargs.
+    No header reads, no inference. We set model.metadata ourselves.
+    """
+    if DAC is None:
+        raise RuntimeError("DAC class import failed")
+
+    dev = _tdev(device)
+
+    # Load payload to CPU (Comfy expects a real torch.device here)
+    obj = load_torch_file(path, device=torch.device("cpu"))
+    sd = _extract_state(obj)
+
+    # Build exactly the architecture you specified
+    model = DAC(**_DAC_KWARGS)
+    model.load_state_dict(sd, strict=strict)
+
+    # Put the meta where it goes.
+    model.metadata = {
+        "kwargs": {**_DAC_KWARGS},
+        "converted_from": "vae_128d_48k.pth",
+        "format": "pth_or_safetensors",
+        "source_path": os.path.basename(path),
+    }
+
+    return model.to(dev).eval()
 
 def get_module_size_in_mb(module: nn.Module) -> float:
     """Calculates the total size of a module's parameters in megabytes."""
@@ -138,7 +198,7 @@ def denoise_process_with_generator(
         pre_sync_input = syncformer_feat_rep
         pre_text_input = text_feat_rep
 
-    pbar = comfy.utils.ProgressBar(len(timesteps))
+    pbar = ProgressBar(len(timesteps))
     with torch.inference_mode():
         for i, t in enumerate(timesteps):
             # Prepare inputs for classifier-free guidance
