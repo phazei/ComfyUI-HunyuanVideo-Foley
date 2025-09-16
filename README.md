@@ -397,7 +397,9 @@ If you find **HunyuanVideo-Foley** useful for your research, please consider cit
       url={https://arxiv.org/abs/2508.16930}, 
 }
 ```
+## Star History
 
+[![Star History Chart](https://api.star-history.com/svg?repos=Tencent-Hunyuan/HunyuanVideo-Foley&type=Date)](https://www.star-history.com/#Tencent-Hunyuan/HunyuanVideo-Foley&Date)
 ---
 
 ## 🙏 **Acknowledgements**
