@@ -15,6 +15,7 @@
   <a href=https://huggingface.co/spaces/tencent/HunyuanVideo-Foley  target="_blank"><img src=https://img.shields.io/badge/%F0%9F%A4%97%20Demo-276cb4.svg height=22px></a>
   <a href=https://arxiv.org/abs/2508.16930 target="_blank"><img src=https://img.shields.io/badge/Report-b5212f.svg?logo=arxiv height=22px></a>
   <a href=https://x.com/TencentHunyuan target="_blank"><img src=https://img.shields.io/badge/Hunyuan-black.svg?logo=x height=22px></a>
+  <a href=https://discord.gg/YEyGGn6Bte target="_blank"><img src=https://img.shields.io/badge/Hunyuan-141984.svg?logo=discord height=22px></a>
 </div>
 
 </div>
