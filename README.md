@@ -1,5 +1,22 @@
 # 🎵 ComfyUI – HunyuanVideo‑Foley Video to Audio
 
+### Troubleshooting (Windows CUDA)
+
+- **Triton/Inductor cache errors** (e.g. FileNotFoundError in `%LOCALAPPDATA%\Temp\torchinductor_*`):
+  - Use short cache paths and set allocator policy before launch:
+    ```
+    set TRITON_CACHE_DIR=C:\triton_cache
+    set TORCHINDUCTOR_CACHE_DIR=C:\inductor_cache
+    set PYTORCH_SDP_KERNEL=math
+    set PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:64,garbage_collection_threshold:0.8
+    ```
+  - Optionally add these folders to Windows Defender Exclusions and enable long paths.
+- **“addmm_cuda not implemented for 'Float8_e5m2'”**:
+  - Use `Precision=fp16` and set `FP8 Quantization=None` in the Model Loader, or
+  - (Repo default) FP8 is disabled unless explicitly requested. If you need FP8, set `HYF_FP8=1` before launch.
+- **VRAM doesn’t drop after a run**:
+  - The sampler now offloads models back to CPU and clears caches automatically after each run.
+
 A tidy set of nodes for **Tencent HunyuanVideo‑Foley** that runs on modest GPUs and scales up nicely.
 
 ## ⚡ Optimized Models Available

@@ -69,7 +69,12 @@ class HunyuanModelLoader:
     FUNCTION = "build_model"
     CATEGORY = "audio/HunyuanFoley"
 
+    # ─────────────────────────────────────────────────────────────────────────────
+    # load_model – FP8 hard-disabled by default; optional re-enable via HYF_FP8=1
+    # Also forces all nn.Linear params to fp16 as a safety net.
+    # ─────────────────────────────────────────────────────────────────────────────
     def load_model(self, model_name, precision, quantization):
+        import os
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
         # dtype resolved after checkpoint is loaded if precision == 'auto'
@@ -104,33 +109,52 @@ class HunyuanModelLoader:
         foley_model.to(dtype=dtype)
         foley_model.eval()
 
-        # Optional FP8 weight-only quantization for Linear layers
-        if quantization != "none":
-            # Choose quantization mode (auto = honor fp8 tensors if present, else default to e4m3fn)
+        # ── SAFETY NET: cast all Linear weights/biases to fp16 (prevents FP8 from sneaking in)
+        def _force_linears_to_fp16(root):
+            for m in root.modules():
+                if isinstance(m, torch.nn.Linear):
+                    try:
+                        if m.weight is not None and m.weight.dtype not in (torch.float16, torch.float32):
+                            m.weight.data = m.weight.data.to(torch.float16)
+                        if m.bias is not None and m.bias.dtype not in (torch.float16, torch.float32):
+                            m.bias.data = m.bias.data.to(torch.float16)
+                    except Exception as e:
+                        print("[HYF] FP16 cast skipped on", type(m), e)
+        _force_linears_to_fp16(foley_model)
+
+        # ── FP8 policy: OFF by default. Re-enable only if you explicitly set HYF_FP8=1.
+        use_fp8 = os.getenv("HYF_FP8", "0") == "1"
+        if use_fp8 and quantization != "none":
+            # Keep original auto-logic, but only when HYF_FP8=1
             if quantization == "auto":
-                capability = (torch.cuda.get_device_capability()
-
-                if torch.cuda.is_available() else (0, 0))
-
-                # Ampere/Lovelace (SM < 90): avoid e4m3 path
+                capability = torch.cuda.get_device_capability() if torch.cuda.is_available() else (0, 0)
                 if capability[0] < 9:
                     qmode = "fp8_e5m2"
                 else:
                     qmode = detected_fp8 if detected_fp8 is not None else "fp8_e4m3fn"
             else:
                 qmode = quantization
-
             counts, saved = _wrap_fp8_inplace(foley_model, quantization=qmode, state_dict=state_dict)
-            logger.info(f"FP8 wrap -> linear:{counts['linear']} conv1d:{counts['conv1d']} conv2d:{counts['conv2d']} | saved ~{saved/(1024**3):.2f} GiB")
+            logger.info(
+                f"[HYF] FP8 wrap ENABLED -> linear:{counts.get('linear',0)} "
+                f"conv1d:{counts.get('conv1d',0)} conv2d:{counts.get('conv2d',0)} | "
+                f"saved ~{saved/(1024**3):.2f} GiB"
+            )
+        else:
+            # Force dropdown to behave as 'none' unless HYF_FP8=1
+            if quantization != "none":
+                logger.info("[HYF] Overriding quantization to 'none' (FP8 disabled by default). "
+                            "Set HYF_FP8=1 if you really want FP8.")
+            quantization = "none"
 
         logger.info(f"Loaded HunyuanVideoFoley main model: {model_name}")
-        
-        # The state_dict is now copied into the model, so we no longer need the 10GB dictionary.
-        # Explicitly delete it and trigger garbage collection.
+
+        # The state_dict is now copied into the model, so we no longer need the big dictionary.
         del state_dict
-        gc.collect() 
-        
+        gc.collect()
+
         return foley_model
+    # ─────────────────────────────────────────────────────────────────────────────
 
     def build_model(self, model_name, precision, quantization):
         foley_model = self.load_model(model_name, precision, quantization)
@@ -259,15 +283,19 @@ class HunyuanFoleySampler:
         torch_compile_cfg=None,
         block_swap_args=None,
     ):
+        import gc
+        import torch
+
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
-        
+
         # Reset the compilation progress counter at the start of every run.
         if hasattr(hunyuan_model, "_compilation_progress_counter"):
             hunyuan_model._compilation_progress_counter[0] = 0
 
         config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs", "hunyuanvideo-foley-xxl.yaml")
-        if not os.path.exists(config_path): raise FileNotFoundError(f"Hunyuan config file not found at {config_path}")
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"Hunyuan config file not found at {config_path}")
         hunyuan_cfg = load_yaml(config_path)
 
         rng = torch.Generator(device="cpu").manual_seed(seed)
@@ -275,157 +303,215 @@ class HunyuanFoleySampler:
         # Determine target dtype from main model, and keep it for deps
         target_dtype = hunyuan_model.dtype
 
-        # \- PHASE 1 -------------------------------------------------------
-        # Feature extraction on GPU with only extractor models resident
-        logger.info("Phase 1: Extracting features")
+        # We'll track GPU tensors to clean them in finally:
+        visual_feats_gpu = {}
+        text_feats_gpu = {}
+        # Optionals from image path:
+        image_slice = None
+        frames_8fps = None
+        frames_25fps = None
+        indices_8fps = None
+        indices_25fps = None
 
-        # Move extractors to GPU in target dtype. Keep tokenizer on CPU.
-        for key in ['siglip2_model', 'syncformer_model', 'clap_model']:
-            hunyuan_deps[key].to(device=device, dtype=target_dtype)
+        try:
+            # \- PHASE 1 -------------------------------------------------------
+            # Feature extraction on GPU with only extractor models resident
+            logger.info("Phase 1: Extracting features")
 
-        visual_feats = {}
-        audio_len_in_s = duration
+            # Move extractors to GPU in target dtype. Keep tokenizer on CPU.
+            for key in ['siglip2_model', 'syncformer_model', 'clap_model']:
+                hunyuan_deps[key].to(device=device, dtype=target_dtype)
 
-        # Handle optional image input
-        if image is not None:
-            # --- Frame Preparation and Resampling for Video-to-Audio ---
-            logger.info("Image input provided. Running in Video-to-Audio mode.")
-            total_input_frames = image.shape[0]
-            num_frames_to_process = int(duration * frame_rate)
+            visual_feats = {}
+            audio_len_in_s = duration
 
-            # Pad frames by repeating the last frame if the input is shorter than the requested duration
-            if num_frames_to_process > total_input_frames:
-                logger.warning(f"Requested duration needs {num_frames_to_process} frames, but only {total_input_frames} are available. Padding by holding the last frame.")
-                padding_needed = num_frames_to_process - total_input_frames
-                last_frame = image[-1:].repeat(padding_needed, 1, 1, 1)
-                image_slice_base = image
-                image_slice = torch.cat((image_slice_base, last_frame), dim=0)
+            # Handle optional image input
+            if image is not None:
+                # --- Frame Preparation and Resampling for Video-to-Audio ---
+                logger.info("Image input provided. Running in Video-to-Audio mode.")
+                total_input_frames = image.shape[0]
+                num_frames_to_process = int(duration * frame_rate)
+
+                # Pad frames by repeating the last frame if the input is shorter than the requested duration
+                if num_frames_to_process > total_input_frames:
+                    logger.warning(f"Requested duration needs {num_frames_to_process} frames, but only {total_input_frames} are available. Padding by holding the last frame.")
+                    padding_needed = num_frames_to_process - total_input_frames
+                    last_frame = image[-1:].repeat(padding_needed, 1, 1, 1)
+                    image_slice_base = image
+                    image_slice = torch.cat((image_slice_base, last_frame), dim=0)
+                else:
+                    image_slice = image[:num_frames_to_process]
+
+                # Convert ComfyUI's IMAGE tensor (B, H, W, C, float 0-1) to model's expected (T, C, H, W, byte 0-255)
+                image_slice = (image_slice * 255.0).byte().permute(0, 3, 1, 2)
+
+                # Resample to 8 FPS for SigLIP2 (content analysis)
+                indices_8fps = torch.linspace(0, num_frames_to_process - 1, int(duration * 8)).long()
+                indices_8fps = indices_8fps.to(device=image_slice.device, non_blocking=True)
+                frames_8fps = image_slice.index_select(0, indices_8fps)
+
+                # Resample to 25 FPS for Synchformer (sync analysis)
+                indices_25fps = torch.linspace(0, num_frames_to_process - 1, int(duration * 25)).long()
+                indices_25fps = indices_25fps.to(device=image_slice.device, non_blocking=True)
+                frames_25fps = image_slice.index_select(0, indices_25fps)
+
+                # Process features from the prepared frames
+                visual_feats, text_feats, audio_len_in_s = feature_process_from_tensors(
+                    frames_8fps, frames_25fps, prompt, negative_prompt, hunyuan_deps, hunyuan_cfg
+                )
+
             else:
-                image_slice = image[:num_frames_to_process]
+                # --- Feature Preparation for Text-to-Audio ---
+                logger.info("No image input provided. Running in Text-to-Audio mode.")
+                # Create empty (zero) tensors for visual features
+                clip_seq_len = int(duration * 8)
+                num_sync_frames = int(duration * 25)
+                num_sync_segments = (num_sync_frames - 16) // 8 + 1
+                sync_seq_len = int(num_sync_segments * 8)
 
-            # Convert ComfyUI's IMAGE tensor (B, H, W, C, float 0-1) to model's expected (T, C, H, W, byte 0-255)
-            image_slice = (image_slice * 255.0).byte().permute(0, 3, 1, 2)
+                # Keep empty features on CPU for now; move to GPU later just-in-time
+                visual_feats['siglip2_feat'] = hunyuan_model.get_empty_clip_sequence(bs=1, len=clip_seq_len).to('cpu', dtype=target_dtype)
+                visual_feats['syncformer_feat'] = hunyuan_model.get_empty_sync_sequence(bs=1, len=sync_seq_len).to('cpu', dtype=target_dtype)
 
-            # Resample to 8 FPS for SigLIP2 (content analysis)
-            indices_8fps = torch.linspace(0, num_frames_to_process - 1, int(duration * 8)).long()
-            indices_8fps = indices_8fps.to(device=image_slice.device, non_blocking=True)
-            frames_8fps = image_slice.index_select(0, indices_8fps)
+                # Process text features normally
+                prompts = [negative_prompt, prompt]
+                text_feat_res, _ = encode_text_feat(prompts, hunyuan_deps)
+                # (unchanged from your original)
+                text_feats = {'text_feat': text_feat_res[1:], 'uncond_text_feat': text_feat_res[:1]}
 
-            # Resample to 25 FPS for Synchformer (sync analysis)
-            indices_25fps = torch.linspace(0, num_frames_to_process - 1, int(duration * 25)).long()
-            indices_25fps = indices_25fps.to(device=image_slice.device, non_blocking=True)
-            frames_25fps = image_slice.index_select(0, indices_25fps)
-
-            # Process features from the prepared frames
-            visual_feats, text_feats, audio_len_in_s = feature_process_from_tensors(frames_8fps, frames_25fps, prompt, negative_prompt, hunyuan_deps, hunyuan_cfg)
-
-        else:
-            # --- Feature Preparation for Text-to-Audio ---
-            logger.info("No image input provided. Running in Text-to-Audio mode.")
-            # Create empty (zero) tensors for visual features
-            clip_seq_len = int(duration * 8)
-            num_sync_frames = int(duration * 25)
-            num_sync_segments = (num_sync_frames - 16) // 8 + 1
-            sync_seq_len = int(num_sync_segments * 8)
-
-            # Keep empty features on CPU for now; move to GPU later just-in-time
-            visual_feats['siglip2_feat'] = hunyuan_model.get_empty_clip_sequence(bs=1, len=clip_seq_len).to('cpu', dtype=target_dtype)
-            visual_feats['syncformer_feat'] = hunyuan_model.get_empty_sync_sequence(bs=1, len=sync_seq_len).to('cpu', dtype=target_dtype)
-
-            # Process text features normally
-            prompts = [negative_prompt, prompt]
-            text_feat_res, _ = encode_text_feat(prompts, hunyuan_deps)
-            text_feats = {'text_feat': text_feat_res[1:], 'uncond_text_feat': text_feat_res[:1]}
-
-        # Immediately offload extractor models and free cache (ping-pong step)
-        for key in ['siglip2_model', 'syncformer_model', 'clap_model']:
-            hunyuan_deps[key].to("cpu")
-        mm.soft_empty_cache()
-
-        # Move features to CPU (pinned) to minimize residency between phases
-        # Ensure features are in target dtype and pinned for fast H2D copy later
-        for k in ['siglip2_feat', 'syncformer_feat']:
-            if visual_feats.get(k) is not None:
-                visual_feats[k] = visual_feats[k].to('cpu', dtype=target_dtype, copy=True).pin_memory()
-        for k in ['text_feat', 'uncond_text_feat']:
-            text_feats[k] = text_feats[k].to('cpu', dtype=target_dtype, copy=True).pin_memory()
-
-        # \- PHASE 2 -------------------------------------------------------
-        # Denoising with only the main model resident; delay DAC until decode
-        logger.info("Phase 2: Denoising with main model")
-
-        # Apply (optional) torch.compile policy lazily, just before sampling.
-        if torch_compile_cfg is not None and not getattr(hunyuan_model, "_blocks_are_compiled", False):
-            try:
-                # Reuse the loader's helper to avoid duplicating logic.
-                hunyuan_model = HunyuanFoleyTorchCompile._apply_torch_compile(hunyuan_model, torch_compile_cfg)
-                logger.info("HunyuanVideoFoley blocks prepared for torch.compile.")
-            except Exception as e:
-                logger.error(f"TorchCompile setup failed; continuing with eager model. Error: {e}")
-
-        # Apply BlockSwap if provided; otherwise place the model on the main device.
-        if block_swap_args is not None:
-            hunyuan_model.block_swap(
-                blocks_to_swap=block_swap_args.get("blocks_to_swap", 0),
-                use_non_blocking=block_swap_args.get("use_non_blocking", False),
-                prefetch_blocks=block_swap_args.get("prefetch_blocks", 0),
-                block_swap_debug=block_swap_args.get("block_swap_debug", False),
-            )
-        else:
-            # If not used, we must explicitly move the model to the main device.
-            hunyuan_model.to(device)
-
-        # Just-in-time copy features to GPU
-        visual_feats_gpu = {
-            'siglip2_feat': visual_feats['siglip2_feat'].to(device, non_blocking=True),
-            'syncformer_feat': visual_feats['syncformer_feat'].to(device, non_blocking=True),
-        }
-        text_feats_gpu = {
-            'text_feat': text_feats['text_feat'].to(device, non_blocking=True),
-            'uncond_text_feat': text_feats['uncond_text_feat'].to(device, non_blocking=True),
-        }
-
-        # Combine all necessary model components into one dictionary for the denoiser
-        # Avoid mutating shared deps; shallow-copy into a fresh AttributeDict for this call
-        model_dict_for_process = AttributeDict(dict(hunyuan_deps))
-        model_dict_for_process['foley_model'] = hunyuan_model
-        model_dict_for_process['device'] = device
-
-        logger.info(f"Generating {audio_len_in_s:.2f}s of audio...")
-        logger.debug(f"Visual features keys ready for denoiser: {list(visual_feats_gpu.keys())}")  # Added for debugging
-
-        # Ensure DAC is on GPU (and in a safe dtype) **before** denoise; decode happens inside the denoiser
-        hunyuan_deps['dac_model'].to(device=device, dtype=torch.float32)
-        # Run the denoising process on the GPU
-        decoded_waveform, sample_rate = denoise_process_with_generator(
-            visual_feats_gpu, text_feats_gpu, audio_len_in_s,
-            model_dict_for_process, hunyuan_cfg,
-            guidance_scale=cfg_scale, num_inference_steps=steps,
-            batch_size=batch_size, sampler=sampler, generator=rng
-        )
-
-        waveform_batch = decoded_waveform.float().cpu()
-
-        # --- Model Offloading for VRAM Management ---
-        if force_offload:
-            logger.info("Offloading models to save VRAM...")
-            hunyuan_model.to(offload_device)
-            for key in ['dac_model']:
-                hunyuan_deps[key].to(offload_device)
+            # Immediately offload extractor models and free cache (ping-pong step)
+            for key in ['siglip2_model', 'syncformer_model', 'clap_model']:
+                hunyuan_deps[key].to("cpu")
             mm.soft_empty_cache()
 
-        # --- Prepare the two separate outputs ---
-        # Output 1: A standard AUDIO dict with only the first waveform.
-        # This is for convenience and direct connection to simple nodes like Preview Audio.
-        first_waveform = waveform_batch[0].unsqueeze(0)
-        audio_output_first = {"waveform": first_waveform, "sample_rate": sample_rate}
+            # Move features to CPU (pinned) to minimize residency between phases
+            # Ensure features are in target dtype and pinned for fast H2D copy later
+            for k in ['siglip2_feat', 'syncformer_feat']:
+                if visual_feats.get(k) is not None:
+                    visual_feats[k] = visual_feats[k].to('cpu', dtype=target_dtype, copy=True).pin_memory()
+            for k in ['text_feat', 'uncond_text_feat']:
+                text_feats[k] = text_feats[k].to('cpu', dtype=target_dtype, copy=True).pin_memory()
 
-        # Output 2: An AUDIO dict containing the entire batch of waveforms.
-        # This is for advanced workflows and compatibility with batch-aware nodes.
-        audio_output_batch = {"waveform": waveform_batch, "sample_rate": sample_rate}
+            # \- PHASE 2 -------------------------------------------------------
+            # Denoising with only the main model resident; delay DAC until decode
+            logger.info("Phase 2: Denoising with main model")
 
-        return (audio_output_first, audio_output_batch)
-    
+            # Apply (optional) torch.compile policy lazily, just before sampling.
+            if torch_compile_cfg is not None and not getattr(hunyuan_model, "_blocks_are_compiled", False):
+                try:
+                    # Reuse the loader's helper to avoid duplicating logic.
+                    hunyuan_model = HunyuanFoleyTorchCompile._apply_torch_compile(hunyuan_model, torch_compile_cfg)
+                    logger.info("HunyuanVideoFoley blocks prepared for torch.compile.")
+                except Exception as e:
+                    logger.error(f"TorchCompile setup failed; continuing with eager model. Error: {e}")
+
+            # Apply BlockSwap if provided; otherwise place the model on the main device.
+            if block_swap_args is not None:
+                hunyuan_model.block_swap(
+                    blocks_to_swap=block_swap_args.get("blocks_to_swap", 0),
+                    use_non_blocking=block_swap_args.get("use_non_blocking", False),
+                    prefetch_blocks=block_swap_args.get("prefetch_blocks", 0),
+                    block_swap_debug=block_swap_args.get("block_swap_debug", False),
+                )
+            else:
+                # If not used, we must explicitly move the model to the main device.
+                hunyuan_model.to(device)
+
+            # Just-in-time copy features to GPU
+            visual_feats_gpu = {
+                'siglip2_feat': visual_feats['siglip2_feat'].to(device, non_blocking=True),
+                'syncformer_feat': visual_feats['syncformer_feat'].to(device, non_blocking=True),
+            }
+            text_feats_gpu = {
+                'text_feat': text_feats['text_feat'].to(device, non_blocking=True),
+                'uncond_text_feat': text_feats['uncond_text_feat'].to(device, non_blocking=True),
+            }
+
+            # Combine all necessary model components into one dictionary for the denoiser
+            # Avoid mutating shared deps; shallow-copy into a fresh AttributeDict for this call
+            model_dict_for_process = AttributeDict(dict(hunyuan_deps))
+            model_dict_for_process['foley_model'] = hunyuan_model
+            model_dict_for_process['device'] = device
+
+            logger.info(f"Generating {audio_len_in_s:.2f}s of audio...")
+            logger.debug(f"Visual features keys ready for denoiser: {list(visual_feats_gpu.keys())}")  # Added for debugging
+
+            # Ensure DAC is on GPU (and in a safe dtype) **before** denoise; decode happens inside the denoiser
+            hunyuan_deps['dac_model'].to(device=device, dtype=torch.float32)
+
+            # Run the denoising process on the GPU
+            decoded_waveform, sample_rate = denoise_process_with_generator(
+                visual_feats_gpu, text_feats_gpu, audio_len_in_s,
+                model_dict_for_process, hunyuan_cfg,
+                guidance_scale=cfg_scale, num_inference_steps=steps,
+                batch_size=batch_size, sampler=sampler, generator=rng
+            )
+
+            waveform_batch = decoded_waveform.float().cpu()
+
+            # --- Model Offloading for VRAM Management (respect your original flag) ---
+            if force_offload:
+                logger.info("Offloading models to save VRAM...")
+                hunyuan_model.to(offload_device)
+                for key in ['dac_model']:
+                    hunyuan_deps[key].to(offload_device)
+                mm.soft_empty_cache()
+
+            # --- Prepare the two separate outputs ---
+            # Output 1: A standard AUDIO dict with only the first waveform.
+            # This is for convenience and direct connection to simple nodes like Preview Audio.
+            first_waveform = waveform_batch[0].unsqueeze(0)
+            audio_output_first = {"waveform": first_waveform, "sample_rate": sample_rate}
+
+            # Output 2: An AUDIO dict containing the entire batch of waveforms.
+            # This is for advanced workflows and compatibility with batch-aware nodes.
+            audio_output_batch = {"waveform": waveform_batch, "sample_rate": sample_rate}
+
+            return (audio_output_first, audio_output_batch)
+
+        finally:
+            # ALWAYS offload big models back to CPU and free CUDA caches after a run.
+            try:
+                hunyuan_model.to(offload_device)
+            except Exception:
+                pass
+            try:
+                if 'dac_model' in hunyuan_deps:
+                    hunyuan_deps['dac_model'].to(offload_device)
+            except Exception:
+                pass
+
+            # Delete possible GPU tensors created during the run
+            try:
+                for d in (visual_feats_gpu, text_feats_gpu):
+                    for k, v in list(d.items()):
+                        if isinstance(v, torch.Tensor) and v.is_cuda:
+                            d[k] = None
+                            del v
+            except Exception:
+                pass
+
+            # Clean up intermediates from image path if they exist
+            for t in (image_slice, frames_8fps, frames_25fps, indices_8fps, indices_25fps):
+                try:
+                    if isinstance(t, torch.Tensor) and t.is_cuda:
+                        del t
+                except Exception:
+                    pass
+
+            # Release caches and run GC
+            try:
+                mm.soft_empty_cache()
+            except Exception:
+                pass
+            try:
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
+            except Exception:
+                pass
+            gc.collect()
+
+
 # -----------------------------------------------------------------------------------
 # NODE: Hunyuan Foley Torch Compile (optional accelerator)
 # -----------------------------------------------------------------------------------
