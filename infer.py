@@ -76,8 +76,14 @@ def parse_args():
     parser.add_argument(
         "--config_path", 
         type=str, 
-        required=True,
-        help="Path to the configuration file (.yaml file)"
+        help="Path to the configuration file (.yaml file). If not specified, will be inferred from model_size"
+    )
+    parser.add_argument(
+        "--model_size",
+        type=str,
+        choices=["xl", "xxl"],
+        default="xxl",
+        help="Model size (xl/xxl). Auto-selects config and model file (default: xxl)"
     )
     
     input_group = parser.add_mutually_exclusive_group(required=True)
@@ -167,11 +173,31 @@ def parse_args():
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Logging level"
     )
+    parser.add_argument(
+        "--enable_offload", 
+        action="store_true",
+        help="Enable model offloading to reduce peak memory usage (good for small VRAM GPUs)"
+    )
     
     args = parser.parse_args()
     
     if args.single_video and not args.single_prompt:
         parser.error("--single_prompt is required when using --single_video")
+    
+    # 如果指定了model_size，自动推断config_path和model文件
+    if args.model_size:
+        config_mapping = {
+            "xl": "configs/hunyuanvideo-foley-xl.yaml",
+            "xxl": "configs/hunyuanvideo-foley-xxl.yaml"
+        }
+        
+        if not args.config_path:
+            args.config_path = config_mapping[args.model_size]
+            logger.info(f"Auto-selected config for {args.model_size} model: {args.config_path}")
+    elif not args.config_path:
+        args.model_size = "xxl"
+        args.config_path = "configs/hunyuanvideo-foley-xxl.yaml"
+        logger.info(f"Using default {args.model_size} model: {args.config_path}")
     
     return args
 
@@ -254,7 +280,7 @@ def main():
     logger.info(f"Output directory: {args.output_dir}")
     
     logger.info("Loading models...")
-    model_dict, cfg = load_model(args.model_path, args.config_path, device)
+    model_dict, cfg = load_model(args.model_path, args.config_path, device, enable_offload=args.enable_offload, model_size=args.model_size)
     
     if args.single_video:
         process_single_video(

@@ -1,12 +1,12 @@
 model_config:
-  model_name: HunyuanVideo-Foley-XXL
+  model_name: HunyuanVideo-Foley-XL
   model_type: 1d
   model_precision: bf16
   model_kwargs:
-    depth_triple_blocks: 18
-    depth_single_blocks: 36
-    hidden_size: 1536
-    num_heads: 12
+    depth_triple_blocks: 12
+    depth_single_blocks: 24
+    hidden_size: 1408
+    num_heads: 11
     mlp_ratio: 4
     mlp_act_type: "gelu_tanh"
     qkv_bias: True

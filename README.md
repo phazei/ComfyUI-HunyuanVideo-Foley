@@ -45,6 +45,17 @@
 
 ---
 
+## 📰 **News**
+
+<div style="background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%); padding: 20px; border-radius: 15px; margin: 20px 0; border-left: 5px solid #2196f3;">
+
+- **[2025.9.29]** 🚀 **HunyuanVideo-Foley-XL Model Release** - Release XL-sized model with offload inference support, significantly reducing VRAM requirements.
+- **[2025.8.28]** 🌟 **HunyuanVideo-Foley Open Source Release** - Inference code and model weights publicly available.
+
+</div>
+
+---
+
 ## 🎥 **Demo & Showcase**
 
 <div align="center">
@@ -268,7 +279,7 @@ The **TV2A (Text-Video-to-Audio)** task presents a complex multimodal generation
 - **CUDA**: 12.4 or 11.8 recommended
 - **Python**: 3.8+ 
 - **OS**: Linux (primary support)
-- Note: This model requires approximately 20GB of VRAM for inference. It is recommended to use a GPU >= 24GB of VRAM​ (such as RTX 3090 or 4090) for stable performance.
+- **VRAM**: 20GB for XXL model (or 12GB with `--enable_offload`), 16GB for XL model (or 8GB with `--enable_offload`)
 
 </div>
 
@@ -322,6 +333,13 @@ huggingface-cli download tencent/HunyuanVideo-Foley
 
 ## 💻 **Usage**
 
+### 📊 **Model Specifications**
+
+| Model | Checkpoint | VRAM (Normal) | VRAM (Offload) |
+|-------|------------|---------------|----------------|
+| **XXL** *(Default)* | `hunyuanvideo_foley.pth` | 20GB | 12GB |
+| **XL** | `hunyuanvideo_foley_xl.pth` | 16GB | 8GB |
+
 ### 🎬 **Single Video Generation**
 
 <div style="background: #e8f5e8; padding: 15px; border-radius: 8px; border-left: 4px solid #28a745; margin: 10px 0;color: #333;">
@@ -331,12 +349,22 @@ Generate Foley audio for a single video file with text description:
 </div>
 
 ```bash
+# Use XXL model (default, best quality)
 python3 infer.py \
     --model_path PRETRAINED_MODEL_PATH_DIR \
-    --config_path ./configs/hunyuanvideo-foley-xxl.yaml \
     --single_video video_path \
     --single_prompt "audio description" \
-    --output_dir OUTPUT_DIR
+    --output_dir OUTPUT_DIR \
+    # --enable_offload  
+
+# Use XL model (memory-friendly)
+python3 infer.py \
+    --model_path PRETRAINED_MODEL_PATH_DIR \
+    --model_size xl \
+    --single_video video_path \
+    --single_prompt "audio description" \
+    --output_dir OUTPUT_DIR \
+    # --enable_offload
 ```
 
 ### 📂 **Batch Processing**
@@ -351,11 +379,12 @@ Process multiple videos using a CSV file with video paths and descriptions:
 # Download sample test videos
 bash ./download_test_videos.sh
 
+# Batch processing
 python3 infer.py \
     --model_path PRETRAINED_MODEL_PATH_DIR \
-    --config_path ./configs/hunyuanvideo-foley-xxl.yaml \
     --csv_path assets/test.csv \
-    --output_dir OUTPUT_DIR
+    --output_dir OUTPUT_DIR \
+    # --enable_offload
 ```
 
 ### 🌐 **Interactive Web Interface**
@@ -367,8 +396,16 @@ Launch a user-friendly Gradio web interface for easy interaction:
 </div>
 
 ```bash
+# Launch with XXL model (default)
 export HIFI_FOLEY_MODEL_PATH=PRETRAINED_MODEL_PATH_DIR
 python3 gradio_app.py
+
+# Launch with XL model (memory-friendly)
+export HIFI_FOLEY_MODEL_PATH=PRETRAINED_MODEL_PATH_DIR
+MODEL_SIZE=xl python3 gradio_app.py
+
+# Optional: Enable offload to reduce memory usage
+ENABLE_OFFLOAD=true python3 gradio_app.py
 ```
 
 <div align="center" style="margin: 20px 0; color: #333;">

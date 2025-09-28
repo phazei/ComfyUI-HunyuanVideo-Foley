@@ -154,4 +154,7 @@ def feature_process(video_path, prompt, model_dict, cfg, neg_prompt=None):
         'uncond_text_feat': uncond_text_feat,
     })
 
+    if hasattr(model_dict, 'manager') and hasattr(model_dict.manager, 'release_feature_models'):
+        model_dict.manager.release_feature_models()
+
     return visual_feats, text_feats, audio_len_in_s

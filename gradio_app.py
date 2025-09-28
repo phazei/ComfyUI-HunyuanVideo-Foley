@@ -20,7 +20,9 @@ device = None
 
 # need to modify the model path
 MODEL_PATH = os.environ.get("HIFI_FOLEY_MODEL_PATH", "./pretrained_models/")
-CONFIG_PATH = "configs/hunyuanvideo-foley-xxl.yaml"
+ENABLE_OFFLOAD = os.environ.get("ENABLE_OFFLOAD", "false").lower() in ("true", "1", "yes")
+MODEL_SIZE = os.environ.get("MODEL_SIZE", "xxl")  # default to xxl model
+CONFIG_PATH = os.environ.get("CONFIG_PATH", "")
 
 def setup_device(device_str: str = "auto", gpu_id: int = 0) -> torch.device:
     """Setup computing device"""
@@ -49,19 +51,28 @@ def auto_load_models() -> str:
     
     try:
         if not os.path.exists(MODEL_PATH):
-            return f"❌ Model file not found: {MODEL_PATH}"
-        if not os.path.exists(CONFIG_PATH):
-            return f"❌ Config file not found: {CONFIG_PATH}"
+            return f"❌ Model directory not found: {MODEL_PATH}"
         
         # Use GPU by default
         device = setup_device("auto", 0)
         
+        # Auto-select config if not specified
+        config_path = CONFIG_PATH
+        if not config_path:
+            config_mapping = {
+                "xl": "configs/hunyuanvideo-foley-xl.yaml",
+                "xxl": "configs/hunyuanvideo-foley-xxl.yaml"
+            }
+            config_path = config_mapping.get(MODEL_SIZE, "configs/hunyuanvideo-foley-xxl.yaml")
+        
         # Load model
         logger.info("Auto-loading model...")
         logger.info(f"Model path: {MODEL_PATH}")
-        logger.info(f"Config path: {CONFIG_PATH}")
+        logger.info(f"Model size: {MODEL_SIZE}")
+        logger.info(f"Config path: {config_path}")
+        logger.info(f"Offload mode: {'enabled' if ENABLE_OFFLOAD else 'disabled'}")
         
-        model_dict, cfg = load_model(MODEL_PATH, CONFIG_PATH, device)
+        model_dict, cfg = load_model(MODEL_PATH, config_path, device, enable_offload=ENABLE_OFFLOAD, model_size=MODEL_SIZE)
         
         logger.info("✅ Model loaded successfully!")
         return "✅ Model loaded successfully!"
