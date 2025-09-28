@@ -45,7 +45,7 @@
 
 ---
 
-## 📰 **News**
+## 🔥🔥🔥 **News**
 
 <div style="background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%); padding: 20px; border-radius: 15px; margin: 20px 0; border-left: 5px solid #2196f3;">
 
