@@ -141,6 +141,9 @@ dmypy.json
 pyrightconfig.json
 .cursorignore
 
+assets/
+examples/
+
 # For global settings
 __*/
 **/my_*
@@ -151,5 +154,6 @@ tmp*.*
 *.ckpt
 *.pth
 *.safetensors
+
 
 CLAUDE.md
