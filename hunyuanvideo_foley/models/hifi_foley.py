@@ -1,5 +1,13 @@
 from typing import List, Tuple, Optional, Union, Dict
 
+import sys
+import gc
+import time
+from contextlib import nullcontext
+from comfy import model_management as mm
+from comfy.utils import ProgressBar
+from loguru import logger
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -15,6 +23,14 @@ from .nn.mlp_layers import MLP, ConvMLP, FinalLayer1D, ChannelLastConv1d
 from .nn.modulate_layers import ModulateDiT, ckpt_wrapper, apply_gate, modulate
 from .nn.norm_layers import get_norm_layer
 from .nn.posemb_layers import get_nd_rotary_pos_embed
+
+
+def get_module_memory_mb(module: nn.Module) -> float:
+    """Calculates the total size of a module's parameters in megabytes."""
+    total_bytes = 0
+    for param in module.parameters():
+        total_bytes += param.numel() * param.element_size()
+    return total_bytes / (1024 * 1024)
 
 def interleave_two_sequences(x1: torch.Tensor, x2: torch.Tensor):
     # [B, N1, H, C] & [B, N2, H, C]
@@ -510,6 +526,91 @@ class HunyuanVideoFoley(ModelMixin, ConfigMixin):
         nn.init.constant_(self.empty_clip_feat, 0)
         nn.init.constant_(self.empty_sync_feat, 0)
 
+    @property
+    def _non_swappable_modules(self):
+        """Returns a list of all modules that are NOT part of the swappable blocks."""
+        return [
+            self.audio_embedder,
+            self.visual_proj,
+            self.cond_in,
+            self.time_in,
+            self.final_layer,
+            self.empty_clip_feat,
+            self.empty_sync_feat,
+            # Add sync_in and sync_pos_emb if they exist
+            getattr(self, 'sync_in', nn.Identity()),
+            getattr(self, 'sync_pos_emb', nn.Identity()),
+        ]
+
+    def block_swap(self, blocks_to_swap: int, use_non_blocking: bool = False, prefetch_blocks: int = 0, block_swap_debug: bool = False):
+        """
+        Partitions and offloads transformer blocks to CPU to save VRAM, while ensuring essential
+        non-block modules and direct parameters are moved to the main computation device.
+        """
+        # Get the main device directly from ComfyUI's model manager, not from the model's current state.
+        self.main_device = mm.get_torch_device()
+        self.offload_device = mm.unet_offload_device()
+        self.use_non_blocking = use_non_blocking
+        self.prefetch_blocks = prefetch_blocks
+        self.block_swap_debug = block_swap_debug
+        
+        logger.info(f"Setting up device placement: Main Device -> {self.main_device}, Offload Device -> {self.offload_device}")
+
+        # --- Granular, Low-VRAM Device Placement ---
+        # 1. Move all non-swappable modules to the main device.
+        logger.info("Moving non-swappable modules to main device...")
+        for module in self._non_swappable_modules:
+            if isinstance(module, nn.Module):
+                module.to(self.main_device)
+
+        # 2. Move all direct child parameters of the main model to the main device.
+        #    This catches parameters like 'sync_pos_emb' that are not in a submodule.
+        logger.info("Moving direct model parameters to main device...")
+        for param in self.parameters(recurse=False):
+            if isinstance(param, nn.Parameter):
+                param.data = param.data.to(self.main_device)
+
+        # 3. Handle the swappable blocks.
+        all_blocks = list(self.triple_blocks) + list(self.single_blocks)
+        total_blocks = len(all_blocks)
+        
+        blocks_to_swap = max(0, min(blocks_to_swap, total_blocks))
+        self.blocks_to_swap = blocks_to_swap
+        
+        if blocks_to_swap == 0:
+            logger.info("BlockSwap enabled but blocks_to_swap is 0. Moving all blocks to GPU.")
+            for block in all_blocks:
+                block.to(self.main_device)
+            return
+
+        logger.info(f"BlockSwap enabled: Offloading {blocks_to_swap} of {total_blocks} transformer blocks.")
+        swap_start_idx = total_blocks - blocks_to_swap
+        
+        total_offload_memory = 0
+        total_main_memory = 0
+        
+        pbar = ProgressBar(total_blocks)
+        for i, block in enumerate(all_blocks):
+            block_memory = get_module_memory_mb(block)
+            if i < swap_start_idx:
+                # This block stays on the GPU.
+                block.to(self.main_device)
+                total_main_memory += block_memory
+            else:
+                # This block is already on CPU (offload_device) from the loader,
+                # so we just confirm its location.
+                block.to(self.offload_device, non_blocking=self.use_non_blocking)
+                total_offload_memory += block_memory
+            pbar.update(1)
+        
+        mm.soft_empty_cache()
+        gc.collect()
+
+        logger.info("--- BlockSwap Memory Report ---")
+        logger.info(f"Blocks on {self.offload_device} (CPU): {total_offload_memory:.2f} MB")
+        logger.info(f"Blocks on {self.main_device} (GPU): {total_main_memory:.2f} MB")
+        logger.info("-------------------------------")
+
     def get_empty_string_sequence(self, bs=None) -> torch.Tensor:
         if bs is None:
             return self.empty_string_feat
@@ -615,6 +716,20 @@ class HunyuanVideoFoley(ModelMixin, ConfigMixin):
         drop_visual: Optional[List[bool]] = None,
         return_dict: bool = True,
     ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
+        
+        # --- Start of new BlockSwap logic ---
+        is_swapping = hasattr(self, 'blocks_to_swap') and self.blocks_to_swap > 0
+        cuda_stream = None
+        events = None
+        if is_swapping:
+            all_blocks = list(self.triple_blocks) + list(self.single_blocks)
+            swap_start_idx = len(all_blocks) - self.blocks_to_swap
+            
+            # Only create CUDA objects if the main device IS a CUDA device.
+            if self.main_device.type == 'cuda' and torch.cuda.is_available():
+                cuda_stream = torch.cuda.Stream(device=self.main_device)
+                events = [torch.cuda.Event() for _ in all_blocks]
+
         out = {}
         audio = x
         bs, _, ol = x.shape
@@ -696,8 +811,30 @@ class HunyuanVideoFoley(ModelMixin, ConfigMixin):
         assert (
             add_sync_layer < self.depth_triple_blocks
         ), f"The layer to add mel_spectrogram feature and sync feature should in the triple_stream_blocks (n: {self.depth_triple_blocks})."
+        
+        # --- Start of MODIFIED block processing loop ---
+        
         # Triple-stream blocks
         for layer_num, block in enumerate(self.triple_blocks):
+            block_idx = layer_num  # Overall index
+
+            if is_swapping:
+                # Prefetch next blocks if enabled
+                for offset in range(1, self.prefetch_blocks + 1):
+                    prefetch_idx = block_idx + offset
+                    if prefetch_idx < len(all_blocks) and prefetch_idx >= swap_start_idx:
+                        with torch.cuda.stream(cuda_stream) if cuda_stream else nullcontext():
+                            all_blocks[prefetch_idx].to(self.main_device, non_blocking=self.use_non_blocking)
+                            if events: events[prefetch_idx].record(cuda_stream)
+                
+                # Move current block to GPU if needed and wait for it
+                if block_idx >= swap_start_idx:
+                    if events and not events[block_idx].query(): events[block_idx].synchronize()
+                    block.to(self.main_device)
+
+                if self.block_swap_debug: compute_start = time.perf_counter()
+
+            # --- Original block execution logic ---
             if self.add_sync_feat_to_audio and layer_num == add_sync_layer:
                 audio = audio + add_sync_feat_to_audio
             triple_block_args = [audio, cond, v_cond, attn_mask, vec, freqs_cis, v_freqs_cis, sync_vec]
@@ -711,6 +848,14 @@ class HunyuanVideoFoley(ModelMixin, ConfigMixin):
                 )
             else:
                 audio, cond, v_cond = block(*triple_block_args)
+            # --- End of original block execution ---
+
+            if is_swapping:
+                if self.block_swap_debug:
+                    logger.debug(f"Block {block_idx} compute time: {time.perf_counter() - compute_start:.4f}s")
+                # Offload block back to CPU
+                if block_idx >= swap_start_idx:
+                    block.to(self.offload_device, non_blocking=self.use_non_blocking)
 
         x = audio 
         if sync_vec is not None:
@@ -720,13 +865,30 @@ class HunyuanVideoFoley(ModelMixin, ConfigMixin):
         freqs_cos, freqs_sin, _, _ = self.build_rope_for_audio_visual(audio_seq_len, v_cond_seq_len)
         if self.add_sync_feat_to_audio:
             vec = add_sync_feat_to_audio + vec.unsqueeze(dim=1)
+        
+        # Single-stream blocks
         if len(self.single_blocks) > 0:
             for layer_num, block in enumerate(self.single_blocks):
-                single_block_args = [
-                    x,
-                    vec,
-                    (freqs_cos, freqs_sin),
-                ]
+                block_idx = len(self.triple_blocks) + layer_num # Continue overall index
+
+                if is_swapping:
+                    # Prefetch
+                    for offset in range(1, self.prefetch_blocks + 1):
+                        prefetch_idx = block_idx + offset
+                        if prefetch_idx < len(all_blocks) and prefetch_idx >= swap_start_idx:
+                            with torch.cuda.stream(cuda_stream) if cuda_stream else nullcontext():
+                                all_blocks[prefetch_idx].to(self.main_device, non_blocking=self.use_non_blocking)
+                                if events: events[prefetch_idx].record(cuda_stream)
+                    
+                    # Onload
+                    if block_idx >= swap_start_idx:
+                        if events and not events[block_idx].query(): events[block_idx].synchronize()
+                        block.to(self.main_device)
+                    
+                    if self.block_swap_debug: compute_start = time.perf_counter()
+
+                # --- Original block execution logic ---
+                single_block_args = [x, vec, (freqs_cos, freqs_sin)]
                 if (
                     self.training
                     and self.gradient_checkpoint
@@ -738,6 +900,15 @@ class HunyuanVideoFoley(ModelMixin, ConfigMixin):
                     x = torch.utils.checkpoint.checkpoint(ckpt_wrapper(block), *single_block_args, use_reentrant=False)
                 else:
                     x = block(*single_block_args)
+                # --- End of original block execution ---
+                
+                if is_swapping:
+                    if self.block_swap_debug:
+                        logger.debug(f"Block {block_idx} compute time: {time.perf_counter() - compute_start:.4f}s")
+                    # Offload
+                    if block_idx >= swap_start_idx:
+                        block.to(self.offload_device, non_blocking=self.use_non_blocking)
+        # --- End of MODIFIED block processing loop ---
 
         audio = x
 
