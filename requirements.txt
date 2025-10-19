@@ -11,9 +11,6 @@ accelerate
 transformers
 sentencepiece
 
-# Audio VAE model (requires direct git install)
-git+https://github.com/descriptinc/audiotools
-
 # Image & Tensor manipulation
 pillow
 einops

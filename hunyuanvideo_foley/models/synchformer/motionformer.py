@@ -4,7 +4,11 @@ from pathlib import Path
 import einops
 import torch
 from omegaconf import OmegaConf
-from timm.layers import trunc_normal_
+try:
+    from timm.layers import trunc_normal_
+except:
+    from timm.models.layers import trunc_normal_
+
 from torch import nn
 
 from .utils import check_if_file_exists_else_download

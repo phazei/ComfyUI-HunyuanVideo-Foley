@@ -9,7 +9,11 @@ import math
 import torch
 import torch.nn as nn
 from einops import rearrange, repeat
-from timm.layers import to_2tuple
+try:
+    from timm.layers import to_2tuple
+except:
+    from timm.models.layers import to_2tuple
+
 from torch import einsum
 from torch.nn import functional as F
 
