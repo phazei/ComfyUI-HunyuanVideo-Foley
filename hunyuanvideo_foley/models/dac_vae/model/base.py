@@ -6,7 +6,10 @@ from typing import Union
 import numpy as np
 import torch
 import tqdm
-from audiotools import AudioSignal
+try:
+    from audiotools import AudioSignal
+except ImportError:
+    from .._audiotools_stubs import AudioSignal
 from torch import nn
 
 SUPPORTED_VERSIONS = ["1.0.0"]

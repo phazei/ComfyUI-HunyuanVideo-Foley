@@ -4,8 +4,11 @@ from typing import Union
 
 import numpy as np
 import torch
-from audiotools import AudioSignal
-from audiotools.ml import BaseModel
+try:
+    from audiotools import AudioSignal
+    from audiotools.ml import BaseModel
+except ImportError:
+    from .._audiotools_stubs import AudioSignal, BaseModel
 from torch import nn
 
 from .base import CodecMixin
