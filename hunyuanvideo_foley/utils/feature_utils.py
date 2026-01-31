@@ -68,7 +68,11 @@ def encode_video_with_siglip2(x: torch.Tensor, model_dict, batch_size: int = -1)
     x = rearrange(x, "b t c h w -> (b t) c h w")
     outputs = []
     for i in range(0, b * t, batch_size):
-        outputs.append(model_dict.siglip2_model.get_image_features(pixel_values=x[i : i + batch_size]))
+        output = model_dict.siglip2_model.get_image_features(pixel_values=x[i : i + batch_size])
+        # Transformers 5.0+ returns BaseModelOutputWithPooling instead of tensor
+        if hasattr(output, 'pooler_output'):
+            output = output.pooler_output
+        outputs.append(output)
     res = torch.cat(outputs, dim=0)
     res = rearrange(res, "(b t) d -> b t d", b=b)
     return res

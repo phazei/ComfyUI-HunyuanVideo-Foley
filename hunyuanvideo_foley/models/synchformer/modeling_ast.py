@@ -28,7 +28,7 @@ from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling, SequenceClassifierOutput
 from transformers.modeling_utils import PreTrainedModel
-from transformers.pytorch_utils import find_pruneable_heads_and_indices, prune_linear_layer
+from ...utils.compat import find_pruneable_heads_and_indices, prune_linear_layer
 from transformers.models.audio_spectrogram_transformer.modeling_audio_spectrogram_transformer import ASTConfig
 from transformers.utils import (
     add_code_sample_docstrings,
