@@ -12,6 +12,7 @@ from torchvision.transforms import v2
 from transformers import AutoTokenizer, AutoModel, ClapTextModelWithProjection
 from accelerate import init_empty_weights
 
+from huggingface_hub import hf_hub_download
 import folder_paths
 import comfy.model_management as mm
 from comfy.utils import load_torch_file
@@ -25,6 +26,44 @@ logger.add(sys.stdout, level="INFO", format="HunyuanVideo-Foley: {message}")
 foley_models_dir = os.path.join(folder_paths.models_dir, "foley")
 if "foley" not in folder_paths.folder_names_and_paths:
     folder_paths.folder_names_and_paths["foley"] = ([foley_models_dir], folder_paths.supported_pt_extensions)
+
+# --- Auto-download registry: filename -> (HuggingFace repo, remote filename) ---
+DOWNLOADABLE_MODELS = {
+    "hunyuanvideo_foley.safetensors": ("phazei/HunyuanVideo-Foley", "hunyuanvideo_foley.safetensors"),
+    "hunyuanvideo_foley_fp8_e4m3fn.safetensors": ("phazei/HunyuanVideo-Foley", "hunyuanvideo_foley_fp8_e4m3fn.safetensors"),
+    "hunyuanvideo_foley_fp8_e5m2.safetensors": ("phazei/HunyuanVideo-Foley", "hunyuanvideo_foley_fp8_e5m2.safetensors"),
+    "synchformer_state_dict_fp16.safetensors": ("phazei/HunyuanVideo-Foley", "synchformer_state_dict_fp16.safetensors"),
+    "vae_128d_48k_fp16.safetensors": ("phazei/HunyuanVideo-Foley", "vae_128d_48k_fp16.safetensors"),
+}
+
+def get_foley_models(filter_fn=None):
+    """List locally available + known downloadable models, with optional name filter."""
+    existing = set(folder_paths.get_filename_list("foley"))
+    all_models = sorted(existing | set(DOWNLOADABLE_MODELS.keys()))
+    if filter_fn:
+        all_models = [m for m in all_models if filter_fn(m)]
+    return all_models if all_models else ["(no models found)"]
+
+def ensure_model_downloaded(model_name):
+    """Return local path to a foley model, auto-downloading from HuggingFace if needed."""
+    local_path = folder_paths.get_full_path("foley", model_name)
+    if local_path and os.path.exists(local_path):
+        return local_path
+    # Also check the directory directly (covers freshly created dirs not yet in cache)
+    direct_path = os.path.join(foley_models_dir, model_name)
+    if os.path.exists(direct_path):
+        return direct_path
+    if model_name not in DOWNLOADABLE_MODELS:
+        raise FileNotFoundError(
+            f"Model '{model_name}' not found in ComfyUI/models/foley/ and is not available for auto-download. "
+            f"Downloadable models: {', '.join(DOWNLOADABLE_MODELS.keys())}"
+        )
+    repo_id, filename = DOWNLOADABLE_MODELS[model_name]
+    logger.info(f"Auto-downloading {filename} from {repo_id} ...")
+    os.makedirs(foley_models_dir, exist_ok=True)
+    downloaded_path = hf_hub_download(repo_id=repo_id, filename=filename, local_dir=foley_models_dir)
+    logger.info(f"Download complete: {filename}")
+    return downloaded_path
 
 # --- Import the original, unmodified HunyuanVideo-Foley modules ---
 # We treat the original code as an external library to keep our node clean.
@@ -59,7 +98,7 @@ class HunyuanModelLoader:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model_name": (folder_paths.get_filename_list("foley"),),
+                "model_name": (get_foley_models(),),
                 "precision": (["auto", "bf16", "fp16", "fp32"], {"default": "bf16", "tooltip": "Compute dtype for non-quantized params and autocast (auto = detect from checkpoint)"}),
                 "quantization": (["none", "fp8_e4m3fn", "fp8_e5m2", "auto"], {"default": "auto", "tooltip": "FP8 weight-only storage for Linear layers, saves a few GB VRAM (compute still fp16/bf16)"}),
             },
@@ -75,7 +114,7 @@ class HunyuanModelLoader:
         # dtype resolved after checkpoint is loaded if precision == 'auto'
         dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}.get(precision, torch.bfloat16)
 
-        model_path = folder_paths.get_full_path("foley", model_name)
+        model_path = ensure_model_downloaded(model_name)
         config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs", "hunyuanvideo-foley-xxl.yaml")
         if not os.path.exists(config_path):
             raise FileNotFoundError(f"Hunyuan config file not found at {config_path}")
@@ -158,8 +197,8 @@ class HunyuanDependenciesLoader:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "vae_name": ([f for f in folder_paths.get_filename_list("foley") if "vae" in f],),
-                "synchformer_name": ([f for f in folder_paths.get_filename_list("foley") if "synch" in f],),
+                "vae_name": (get_foley_models(lambda f: "vae" in f),),
+                "synchformer_name": (get_foley_models(lambda f: "synch" in f),),
                 }
             }
 
@@ -172,9 +211,9 @@ class HunyuanDependenciesLoader:
         offload_device = mm.unet_offload_device()
         deps = {}
 
-        # Load local model files (VAE, Synchformer)
-        deps['dac_model'] = load_dac_any(folder_paths.get_full_path("foley", vae_name), device=offload_device)
-        synchformer_sd = load_torch_file(folder_paths.get_full_path("foley", synchformer_name), device=offload_device)
+        # Load local model files (VAE, Synchformer) — auto-download if missing
+        deps['dac_model'] = load_dac_any(ensure_model_downloaded(vae_name), device=offload_device)
+        synchformer_sd = load_torch_file(ensure_model_downloaded(synchformer_name), device=offload_device)
         syncformer_model = Synchformer()
         syncformer_model.load_state_dict(synchformer_sd, strict=False)
         deps['syncformer_model'] = syncformer_model.to(offload_device).eval()
