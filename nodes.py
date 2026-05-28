@@ -76,13 +76,22 @@ class HunyuanModelLoader:
         dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}.get(precision, torch.bfloat16)
 
         model_path = folder_paths.get_full_path("foley", model_name)
-        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs", "hunyuanvideo-foley-xxl.yaml")
-        if not os.path.exists(config_path):
-            raise FileNotFoundError(f"Hunyuan config file not found at {config_path}")
-        cfg = load_yaml(config_path)
 
         # Load weights onto the offload device first to save VRAM
         state_dict = load_torch_file(model_path, device=offload_device)
+
+        # Auto-detect model variant (XL vs XXL) from checkpoint shape
+        configs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs")
+        embedder_key = "audio_embedder.proj.weight"
+        if embedder_key in state_dict and state_dict[embedder_key].shape[0] == 1408:
+            config_name = "hunyuanvideo-foley-xl.yaml"
+        else:
+            config_name = "hunyuanvideo-foley-xxl.yaml"
+        config_path = os.path.join(configs_dir, config_name)
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"Hunyuan config file not found at {config_path}")
+        cfg = load_yaml(config_path)
+        logger.info(f"Auto-detected model variant: {config_name.replace('.yaml', '').replace('hunyuanvideo-foley-', '').upper()}")
 
         # Auto-detect quantization and precision from checkpoint
         detected_fp8 = _detect_ckpt_fp8(state_dict)
@@ -103,6 +112,9 @@ class HunyuanModelLoader:
         # Ensure the runtime parameter dtype matches the requested precision
         foley_model.to(dtype=dtype)
         foley_model.eval()
+
+        # Attach config so downstream nodes (sampler) can access it without hardcoding a path
+        foley_model._hunyuan_cfg = cfg
 
         # Optional FP8 weight-only quantization for Linear layers
         if quantization != "none":
@@ -142,8 +154,8 @@ class HunyuanModelLoader:
         
         # logger.info(f"--- Model Size Report ---")
         # logger.info(f"Total Model Size: {total_model_size_mb:.2f} MB")
-        # logger.info(f"  - Triple-Stream Blocks (19x): {triple_blocks_size_mb:.2f} MB")
-        # logger.info(f"  - Single-Stream Blocks (38x): {single_blocks_size_mb:.2f} MB")
+        # logger.info(f"  - Triple-Stream Blocks ({len(foley_model.triple_blocks)}x): {triple_blocks_size_mb:.2f} MB")
+        # logger.info(f"  - Single-Stream Blocks ({len(foley_model.single_blocks)}x): {single_blocks_size_mb:.2f} MB")
         # logger.info(f"  - Total Swappable Block Size: {total_blocks_size_mb:.2f} MB")
         # logger.info(f"  - Non-Block Parameters (Embedders, etc.): {total_model_size_mb - total_blocks_size_mb:.2f} MB")
         # logger.info(f"-------------------------")
@@ -266,9 +278,8 @@ class HunyuanFoleySampler:
         if hasattr(hunyuan_model, "_compilation_progress_counter"):
             hunyuan_model._compilation_progress_counter[0] = 0
 
-        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs", "hunyuanvideo-foley-xxl.yaml")
-        if not os.path.exists(config_path): raise FileNotFoundError(f"Hunyuan config file not found at {config_path}")
-        hunyuan_cfg = load_yaml(config_path)
+        # Retrieve the config that was auto-detected and attached during model loading
+        hunyuan_cfg = hunyuan_model._hunyuan_cfg
 
         rng = torch.Generator(device="cpu").manual_seed(seed)
 
@@ -611,7 +622,7 @@ class HunyuanBlockSwap:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "blocks_to_swap": ("INT", {"default": 30, "min": 0, "max": 57, "step": 1, "tooltip": "Number of transformer blocks to offload to CPU. The model has 57 blocks in total (19 triple-stream + 38 single-stream)."}),
+                "blocks_to_swap": ("INT", {"default": 30, "min": 0, "max": 57, "step": 1, "tooltip": "Number of transformer blocks to offload to CPU. XXL has 54 blocks (18 triple + 36 single), XL has 36 (12 triple + 24 single)."}),
             },
             "optional": {
                 # These are added for future compatibility, mirroring WanVideo's options.
