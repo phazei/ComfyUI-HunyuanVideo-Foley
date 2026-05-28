@@ -20,6 +20,15 @@ import comfy.utils
 logger.remove()
 logger.add(sys.stdout, level="INFO", format="HunyuanVideo-Foley: {message}")
 
+
+def _load_pretrained_local_first(cls, repo_id, **kwargs):
+    """Load a HuggingFace model/tokenizer with local cache first, avoiding network checks on every run."""
+    try:
+        return cls.from_pretrained(repo_id, local_files_only=True, **kwargs)
+    except OSError:
+        logger.info(f"Downloading {repo_id} (first run only)...")
+        return cls.from_pretrained(repo_id, **kwargs)
+
 # --- Add 'foley' models directory to ComfyUI's search paths ---
 # This ensures ComfyUI can find models placed in 'ComfyUI/models/foley/'
 foley_models_dir = os.path.join(folder_paths.models_dir, "foley")
@@ -207,10 +216,10 @@ class HunyuanDependenciesLoader:
             v2.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
         ])
 
-        # Load models from Hugging Face
-        deps['siglip2_model'] = AutoModel.from_pretrained("google/siglip2-base-patch16-512").to(offload_device).eval()
-        deps['clap_tokenizer'] = AutoTokenizer.from_pretrained("laion/larger_clap_general")
-        deps['clap_model'] = ClapTextModelWithProjection.from_pretrained("laion/larger_clap_general").to(offload_device).eval()
+        # Load models from Hugging Face (local cache first, network only on first run)
+        deps['siglip2_model'] = _load_pretrained_local_first(AutoModel, "google/siglip2-base-patch16-512").to(offload_device).eval()
+        deps['clap_tokenizer'] = _load_pretrained_local_first(AutoTokenizer, "laion/larger_clap_general")
+        deps['clap_model'] = _load_pretrained_local_first(ClapTextModelWithProjection, "laion/larger_clap_general").to(offload_device).eval()
 
         deps['device'] = device
 
